@@ -1,3 +1,6 @@
+using Base: max_values
+using DataStructures
+
 function get_descendants(expr)
     return expr.args
 end
@@ -43,6 +46,75 @@ function isomorphic(t1::Expr, t2::Expr)
     return true
 end
 
+function dice(t1, t2, mapping)
+    t1_descendants = get_descendants(t1)
+    t2_descendants = get_descendants(t2)
+    return
+end
+
+function max(a, b)
+    if a > b
+        return a
+    else
+        return b
+    end
+end
+
+function get_height(expr)
+    queue = Deque{Tuple{Any, Int}}()
+    push!(queue, (expr, 1))
+    max_depth = 0
+
+    while !isempty(queue)
+        node, depth = popfirst!(queue)
+        max_depth = max(max_depth, depth)
+
+        if node isa Expr
+            for arg in node.args
+                push!(queue, (arg, depth + 1))
+            end
+        end
+    end
+
+    return max_depth - 1
+end
+
+function push(expr, l)
+    push!(l[get_height(expr)], expr)
+end
+
+function peek_max(l)
+    if isempty(l)
+        return -1
+    else
+        return maximum(keys(l))
+    end
+end
+
+function pop(l)
+    max_height = peek_max(l)
+    return l[max_height]
+end
+
+function make_height_indexed_list(t, l)
+    push!(l[get_height(t)], l)
+    for child in get_descendants(t)
+        if child isa Expr
+            make_height_indexed_list(child, l)
+        end
+    end
+end
+
+function top_down(t1, t2, minHeight=1)
+    L1 = Dict()
+    L2 = Dict()
+    A = []
+    M = Set()
+
+    make_height_indexed_list(t1, L1)
+    make_height_indexed_list(t2, L2)
+end
+
 function test()
     prog1 = "x = 1; y = 2; z = a + b"
     ex = Meta.parse(prog1)
@@ -59,6 +131,9 @@ function test2()
     ex2 = Meta.parse(prog2)
     println(has_same_label_and_value(ex1, ex2))
     println(isomorphic(ex1, ex2))
+
+    ex = :(a + b * (c - d))
+    println(get_height(ex))
 end
 
 test2()
