@@ -1,5 +1,9 @@
 using DataStructures
 
+function all_pairs(v1::Vector, v2::Vector)
+    return [(x, y) for x in v1, y in v2]
+end
+
 function get_descendants(expr)
     result = []
     for arg in expr.args
@@ -76,7 +80,6 @@ function isomorphic(t1::Expr, t2::Expr)
            end
         end
     end
-
     return true
 end
 
@@ -100,6 +103,18 @@ function make_height_indexed_list(t, l)
     end
 end
 
+function dice(t1, t2, M)
+    t1_desc = get_descendants(t1)
+    t2_desc = get_descendants(t2)
+    common_anchors = sum(1 for (s1, _) in M if s1 in t1_desc; init=0)
+    total_desc = length(t1_desc) + length(t2_desc)
+    if total_desc > 0
+        return (2 * common_anchors) / total_desc
+    else
+        return 0
+    end
+end
+
 function top_down(T1, T2, minHeight=1)
     L1 = Dict{Int, Vector{typeof(T1)}}()
     L2 = Dict{Int, Vector{typeof(T2)}}()
@@ -109,7 +124,7 @@ function top_down(T1, T2, minHeight=1)
     make_height_indexed_list(T1, L1)
     make_height_indexed_list(T2, L2)
 
-    while min(peek_max(L1), peek_max(L2)) > minHeight
+    while min(peek_max(L1), peek_max(L2)) >= minHeight # should be >
         if peek_max(L1) != peek_max(L2)
             if peek_max(L1) > peek_max(L2)
                 for t in pop(L1)
@@ -123,12 +138,9 @@ function top_down(T1, T2, minHeight=1)
         else
             H1 = pop(L1)
             H2 = pop(L2)
-            for t1 in H1
-                for t2 in H2
-                    println(t1, t2)
-                    if isomorphic(t1, t2)
-                        push!(M, (t1, t2))
-                    end
+            for (t1, t2) in all_pairs(H1, H2)
+                if isomorphic(t1, t2)
+                    push!(A, (t1, t2))
                 end
             end
 
@@ -155,19 +167,63 @@ function top_down(T1, T2, minHeight=1)
     return M
 end
 
-function get_unmapped_nodes_in_postorder(T, M)
+function contains(T, M, edited=true)
+    for (t1, t2) in M
+        if edited
+            if t2 == T
+                return true
+            end
+        else
+            if t1 == T
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function get_unmatched_nodes(T, M)
+    result = []
+    if !contains(T, M)
+        push!(result, T)
+    end
+    for child in get_descendants(T)
+        append!(result, get_unmatched_nodes_in_postorder(child, M))
+    end
+    result
+end
+
+function get_unmatched_nodes_in_postorder(T, M)
     result = []
     for child in get_descendants(T)
-        append!(result, get_unmapped_nodes_in_postorder(result))
+        append!(result, get_unmatched_nodes_in_postorder(child, M))
     end
-    if T in M
+    if !contains(T, M)
         push!(result, T)
     end
     return result
 end
 
 function bottom_up(T1, T2, M, minDice=0.5, maxSize=100)
+    for t1 in get_unmatched_nodes_in_postorder(T1, M)
+        candidates = []
+        for c in get_unmatched_nodes(T2, M)
+            if has_same_label_and_value(t1, c) # && has_matched_children(c)
+                push!(candidates, c)
+            end
+        end
 
+        for t2 in candidates
+            if dice(t1, t2,M) > minDice
+                push!(M, (t1, t2))
+                if maximum([length(get_descendants(t1)), length(get_descendants(t2))]) < maxSize
+                    nothing
+                end
+            end
+        end
+    end
+
+    return M
 end
 
 function test2()
@@ -182,4 +238,17 @@ function test2()
     println(M)
 end
 
-test2()
+# test2()
+
+function test_bottom_up()
+    prog1 = "x = 1; y = x + 1"
+    prog2 = "x = 1; y = x + 1; z = 3"
+    ex1 = Meta.parse(prog1)
+    ex2 = Meta.parse(prog2)
+
+    M = top_down(ex1, ex2, 0)
+    M = bottom_up(ex1, ex2, M)
+    println(M)
+end
+
+test_bottom_up()
