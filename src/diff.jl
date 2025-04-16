@@ -1,8 +1,13 @@
-using Base: max_values
 using DataStructures
 
 function get_descendants(expr)
-    return expr.args
+    result = []
+    for arg in expr.args
+        if arg isa Expr
+            push!(result, arg)
+        end
+    end
+    return result
 end
 
 function has_same_label_and_value(expr1::Symbol, expr2::Symbol)
@@ -21,6 +26,35 @@ function has_same_label_and_value(expr1::Expr, expr2::Expr)
     end
 
     return true
+end
+
+function get_height(node)
+    height = 0
+    q = Queue{Union{typeof(node), Nothing}}()
+    enqueue!(q, node)
+    enqueue!(q, nothing)
+    while !isempty(q)
+        curr = dequeue!(q)
+        if curr === nothing
+            height += 1
+            if !isempty(q)
+                enqueue!(q, nothing)
+            end
+        else
+            for child in get_descendants(curr)
+                enqueue!(q, child)
+            end
+        end
+    end
+    return height
+end
+
+function peek_max(l)
+    if isempty(l)
+        return -1
+    else
+        return maximum(keys(l))
+    end
 end
 
 function isomorphic(t1::Expr, t2::Expr)
@@ -46,94 +80,106 @@ function isomorphic(t1::Expr, t2::Expr)
     return true
 end
 
-function dice(t1, t2, mapping)
-    t1_descendants = get_descendants(t1)
-    t2_descendants = get_descendants(t2)
-    return
-end
-
-function max(a, b)
-    if a > b
-        return a
-    else
-        return b
+function open(node::Expr, priority_list::Dict{Int64, Vector{Expr}})
+    height = get_height(node)
+    if !haskey(priority_list, height)
+        priority_list[height] = Vector{typeof(node)}()
     end
-end
-
-function get_height(expr)
-    queue = Deque{Tuple{Any, Int}}()
-    push!(queue, (expr, 1))
-    max_depth = 0
-
-    while !isempty(queue)
-        node, depth = popfirst!(queue)
-        max_depth = max(max_depth, depth)
-
-        if node isa Expr
-            for arg in node.args
-                push!(queue, (arg, depth + 1))
-            end
-        end
-    end
-
-    return max_depth - 1
-end
-
-function push(expr, l)
-    push!(l[get_height(expr)], expr)
-end
-
-function peek_max(l)
-    if isempty(l)
-        return -1
-    else
-        return maximum(keys(l))
-    end
+    append!(priority_list[height], get_descendants(node))
 end
 
 function pop(l)
     max_height = peek_max(l)
-    return l[max_height]
+    return pop!(l, max_height, Vector{Any}())
 end
 
 function make_height_indexed_list(t, l)
-    push!(l[get_height(t)], l)
+    l[get_height(t)] = [t]
     for child in get_descendants(t)
-        if child isa Expr
-            make_height_indexed_list(child, l)
-        end
+        make_height_indexed_list(child, l)
     end
 end
 
-function top_down(t1, t2, minHeight=1)
-    L1 = Dict()
-    L2 = Dict()
-    A = []
-    M = Set()
+function top_down(T1, T2, minHeight=1)
+    L1 = Dict{Int, Vector{typeof(T1)}}()
+    L2 = Dict{Int, Vector{typeof(T2)}}()
+    A = Vector{Tuple{typeof(T1), typeof(T2)}}()
+    M = Set{Tuple{typeof(T1), typeof(T2)}}()
 
-    make_height_indexed_list(t1, L1)
-    make_height_indexed_list(t2, L2)
+    make_height_indexed_list(T1, L1)
+    make_height_indexed_list(T2, L2)
+
+    while min(peek_max(L1), peek_max(L2)) > minHeight
+        if peek_max(L1) != peek_max(L2)
+            if peek_max(L1) > peek_max(L2)
+                for t in pop(L1)
+                    open(t, L1)
+                end
+            else
+                for t in pop(L2)
+                    open(t, L2)
+                end
+            end
+        else
+            H1 = pop(L1)
+            H2 = pop(L2)
+            for t1 in H1
+                for t2 in H2
+                    println(t1, t2)
+                    if isomorphic(t1, t2)
+                        push!(M, (t1, t2))
+                    end
+                end
+            end
+
+            for t1 in H1
+                if !any((t1, x) in A || (t1, x) in M for x in H2)
+                    open(t1, L1)
+                end
+            end
+            for t2 in H2
+                if !any((x, t2) in A || (x, t2) in M for x in H1)
+                    open(t2, L2)
+                end
+            end
+        end
+    end
+
+    sort!(A, by = x -> -dice(x[1], x[2], M))
+    while !isempty(A)
+        (t1, t2) = popfirst!(A)
+        push!(M, (t1, t2))
+        A = [pair for pair in A if pair[1] != t1 && pair[2] != t2]
+    end
+
+    return M
 end
 
-function test()
-    prog1 = "x = 1; y = 2; z = a + b"
-    ex = Meta.parse(prog1)
-    dump(ex)
-    println(get_descendants(ex))
+function get_unmapped_nodes_in_postorder(T, M)
+    result = []
+    for child in get_descendants(T)
+        append!(result, get_unmapped_nodes_in_postorder(result))
+    end
+    if T in M
+        push!(result, T)
+    end
+    return result
 end
 
-# test()
+function bottom_up(T1, T2, M, minDice=0.5, maxSize=100)
+
+end
 
 function test2()
-    prog1 = "x = 1"
-    prog2 = "x = 21"
+    prog1 = "x = 1; y = x + 1"
+    prog2 = "x = 21; y = x + 1"
     ex1 = Meta.parse(prog1)
     ex2 = Meta.parse(prog2)
     println(has_same_label_and_value(ex1, ex2))
     println(isomorphic(ex1, ex2))
 
-    ex = :(a + b * (c - d))
-    println(get_height(ex))
+    M = top_down(ex1, ex2, 1)
+    println(M)
 end
 
 test2()
