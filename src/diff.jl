@@ -1,4 +1,63 @@
 using DataStructures
+using PyCall
+using Pkg
+
+ENV["PYTHON"] = "/home/yusuke/.pyenv/versions/3.12.0/bin/python"
+#Pkg.build("PyCall")
+
+apted = pyimport("apted")
+
+# Define a Python-compatible tree node
+struct PyTreeNode
+    name::String
+    children::Vector{PyTreeNode}
+end
+
+function expr_to_pytree(expr)
+    if expr isa Expr
+        children = [expr_to_pytree(arg) for arg in expr.args]
+        return PyTreeNode(string(expr.head), children)
+    elseif expr isa Symbol
+        return PyTreeNode(string(expr), [])
+    else
+        return PyTreeNode(string(expr), [])
+    end
+end
+
+function pytree_to_expr(node)
+    # Convert leaf node
+    if isempty(node.children)
+        try
+            return Meta.parse(node.name)
+        catch
+            return Symbol(node.name)
+        end
+    end
+
+    head = Symbol(node.name)
+    args = [pytree_to_expr(c) for c in node.children]
+    return Expr(head, args...)
+end
+
+function expr_to_tree(expr)::TreeNode
+    if isa(expr, Expr)
+        children = [expr_to_tree(arg) for arg in expr.args]
+        return TreeNode(string(expr.head), children)
+    elseif isa(expr, Symbol)
+        return TreeNode(string(expr), [])
+    elseif isnothing(expr)
+        return TreeNode("nothing", [])
+    else
+        return TreeNode(string(expr), [])
+    end
+end
+
+function rename_cost(n1::PyTreeNode, n2::PyTreeNode)
+    return n1.label == n2.label ? 0 : 1
+end
+
+insert_cost(node::PyTreeNode) = 1
+delete_cost(node::PyTreeNode) = 1
 
 function all_pairs(v1::Vector, v2::Vector)
     return [(x, y) for x in v1, y in v2]
@@ -204,6 +263,26 @@ function get_unmatched_nodes_in_postorder(T, M)
     return result
 end
 
+function opt(t1, t2)
+    py_t1 = expr_to_pytree(t1)
+    py_t2 = expr_to_pytree(t2)
+    ed = apted.APTED(py_t1, py_t2)
+    mapping = ed.compute_edit_mapping()
+    return mapping
+end
+
+function ast_label(node)
+    if isa(node, Expr)
+        return string(node.head)
+    elseif isa(node, Symbol)
+        return string(node)
+    elseif node === nothing
+        return "nothing"
+    else
+        return string(node)  # for literals like numbers or strings
+    end
+end
+
 function bottom_up(T1, T2, M, minDice=0.5, maxSize=100)
     for t1 in get_unmatched_nodes_in_postorder(T1, M)
         candidates = []
@@ -214,10 +293,18 @@ function bottom_up(T1, T2, M, minDice=0.5, maxSize=100)
         end
 
         for t2 in candidates
-            if dice(t1, t2,M) > minDice
+            d = dice(t1, t2, M)
+            if dice(t1, t2,M) >= minDice # or >?
                 push!(M, (t1, t2))
                 if maximum([length(get_descendants(t1)), length(get_descendants(t2))]) < maxSize
-                    nothing
+                    R = opt(t1, t2)
+                    for (ta, tb) in R
+                        j_ta = pytree_to_expr(ta)
+                        j_tb = pytree_to_expr(tb)
+                        if ast_label(ta) == ast_label(t2)
+                            push!(M, (ta, tb))
+                        end
+                    end
                 end
             end
         end
@@ -225,6 +312,30 @@ function bottom_up(T1, T2, M, minDice=0.5, maxSize=100)
 
     return M
 end
+
+function test_apted()
+    # Define your Julia expressions
+    ex1 = :(a + b)
+    ex2 = :(a - b)
+
+    # Convert Julia expressions to PyTreeNode structures
+    tree1 = expr_to_pytree(ex1)
+    tree2 = expr_to_pytree(ex2)
+
+    # Create an APTED instance and compute the edit distance
+    apt = apted.APTED(tree1, tree2)
+    distance = apt.compute_edit_distance()
+    println("Edit distance: ", distance)
+
+    mapping = apt.compute_edit_mapping()
+    for (t1, t2) in mapping
+        jt1 = pytree_to_expr(t1)
+        jt2 = pytree_to_expr(t2)
+        println("Mapping (converted): ", jt1, " : ", jt2)
+    end
+end
+
+# test_apted()
 
 function test2()
     prog1 = "x = 1; y = x + 1"
@@ -240,14 +351,36 @@ end
 
 # test2()
 
-function test_bottom_up()
-    prog1 = "x = 1; y = x + 1"
-    prog2 = "x = 1; y = x + 1; z = 3"
-    ex1 = Meta.parse(prog1)
-    ex2 = Meta.parse(prog2)
+function test_parse_string(code)
+    buf = IOBuffer(code)
+    exprs = Expr[]
 
-    M = top_down(ex1, ex2, 0)
-    M = bottom_up(ex1, ex2, M)
+    while !eof(buf)
+        ex = Meta.parse(buf, "")
+        ex === nothing && break
+        push!(exprs, ex)
+    end
+
+    return exprs
+end
+
+
+function test_bottom_up()
+    ex1 = :(x = 1;
+            y = 2;
+            if x > 2
+                println("test")
+            end)
+    ex2 = :(x = 1;
+            if x < 2
+                y = 2
+                println("test")
+            end)
+
+
+    M = top_down(ex1, ex2, 1)
+    println(M)
+    M = bottom_up(ex1, ex2, M, 0)
     println(M)
 end
 
