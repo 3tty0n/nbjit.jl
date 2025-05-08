@@ -39,19 +39,6 @@ function pytree_to_expr(node)
     return Expr(head, args...)
 end
 
-function expr_to_tree(expr)::TreeNode
-    if isa(expr, Expr)
-        children = [expr_to_tree(arg) for arg in expr.args]
-        return TreeNode(string(expr.head), children)
-    elseif isa(expr, Symbol)
-        return TreeNode(string(expr), [])
-    elseif isnothing(expr)
-        return TreeNode("nothing", [])
-    else
-        return TreeNode(string(expr), [])
-    end
-end
-
 function rename_cost(n1::PyTreeNode, n2::PyTreeNode)
     return n1.label == n2.label ? 0 : 1
 end
@@ -63,12 +50,20 @@ function all_pairs(v1::Vector, v2::Vector)
     return [(x, y) for x in v1, y in v2]
 end
 
-function get_descendants(expr)
+function get_descendants(expr::Expr)
     result = []
     for arg in expr.args
         if arg isa Expr
             push!(result, arg)
         end
+    end
+    return result
+end
+
+function get_descendants(t::PyTreeNode)
+    result = []
+    for arg in t.children
+        push!(result, arg)
     end
     return result
 end
@@ -83,6 +78,20 @@ function has_same_label_and_value(expr1::Expr, expr2::Expr)
     end
 
     for (arg1, arg2) in zip(expr1.args, expr2.args)
+        if arg1 != arg2
+            return false
+        end
+    end
+
+    return true
+end
+
+function has_same_label_and_value(t1::PyTreeNode, t2::PyTreeNode)
+    if t1.name != t2.name
+        return false
+    end
+
+    for (arg1, arg2) in zip(t1.children, t2.children)
         if arg1 != arg2
             return false
         end
@@ -142,7 +151,27 @@ function isomorphic(t1::Expr, t2::Expr)
     return true
 end
 
-function open(node::Expr, priority_list::Dict{Int64, Vector{Expr}})
+function isomorphic(t1::PyTreeNode, t2::PyTreeNode)
+    if !has_same_label_and_value(t1, t2)
+        return false
+    end
+
+    t1_children = t1.children
+    t2_children = t2.children
+
+    if length(t1_children) != length(t2_children)
+        return false
+    end
+
+    for (c1, c2) in zip(t1_children, t2_children)
+        if !isomorphic(c1, c2)
+            return false
+        end
+    end
+    return true
+end
+
+function open(node, priority_list)
     height = get_height(node)
     if !haskey(priority_list, height)
         priority_list[height] = Vector{typeof(node)}()
@@ -197,6 +226,7 @@ function top_down(T1, T2, minHeight=1)
         else
             H1 = pop(L1)
             H2 = pop(L2)
+            println(H1, " ", H2)
             for (t1, t2) in all_pairs(H1, H2)
                 if isomorphic(t1, t2)
                     push!(A, (t1, t2))
@@ -294,7 +324,7 @@ function bottom_up(T1, T2, M, minDice=0.5, maxSize=100)
 
         for t2 in candidates
             d = dice(t1, t2, M)
-            if dice(t1, t2,M) >= minDice # or >?
+            if dice(t1, t2, M) > minDice # or >?
                 push!(M, (t1, t2))
                 if maximum([length(get_descendants(t1)), length(get_descendants(t2))]) < maxSize
                     R = opt(t1, t2)
@@ -302,7 +332,7 @@ function bottom_up(T1, T2, M, minDice=0.5, maxSize=100)
                         j_ta = pytree_to_expr(ta)
                         j_tb = pytree_to_expr(tb)
                         if ast_label(ta) == ast_label(t2)
-                            push!(M, (ta, tb))
+                            push!(M, (j_ta, j_tb))
                         end
                     end
                 end
@@ -335,52 +365,16 @@ function test_apted()
     end
 end
 
-# test_apted()
-
-function test2()
-    prog1 = "x = 1; y = x + 1"
-    prog2 = "x = 21; y = x + 1"
-    ex1 = Meta.parse(prog1)
-    ex2 = Meta.parse(prog2)
-    println(has_same_label_and_value(ex1, ex2))
-    println(isomorphic(ex1, ex2))
-
-    M = top_down(ex1, ex2, 1)
-    println(M)
-end
-
-# test2()
-
-function test_parse_string(code)
-    buf = IOBuffer(code)
-    exprs = Expr[]
-
-    while !eof(buf)
-        ex = Meta.parse(buf, "")
-        ex === nothing && break
-        push!(exprs, ex)
-    end
-
-    return exprs
-end
-
-
 function test_bottom_up()
-    ex1 = :(x = 1;
-            y = 2;
-            if x > 2
-                println("test")
-            end)
-    ex2 = :(x = 1;
-            if x < 2
-                y = 2
-                println("test")
-            end)
+    ex1 = :(x = 1; y = 2)
+    ex2 = :(x = 1; y = 3)
 
+    t1 = expr_to_pytree(ex1)
+    t2 = expr_to_pytree(ex2)
 
-    M = top_down(ex1, ex2, 1)
+    M = top_down(t1, t2, 1)
     println(M)
-    M = bottom_up(ex1, ex2, M, 0)
+    M = bottom_up(t1, t2, M)
     println(M)
 end
 
