@@ -3,192 +3,64 @@ using PyCall
 using Pkg
 
 ENV["PYTHON"] = "/home/yusuke/.pyenv/versions/3.12.0/bin/python"
-#Pkg.build("PyCall")
+# Pkg.build("PyCall")
 
 apted = pyimport("apted")
 
-# Define a Python-compatible tree node
-struct PyTreeNode
-    name::String
-    children::Vector{PyTreeNode}
-end
+@pydef mutable struct CustomConfig <: apted.Config
+    function rename(self, node1, node2)
+        return node1.label == node2.label ? 0 : 1
+    end
 
-function expr_to_pytree(expr)
-    if expr isa Expr
-        children = [expr_to_pytree(arg) for arg in expr.args]
-        return PyTreeNode(string(expr.head), children)
-    elseif expr isa Symbol
-        return PyTreeNode(string(expr), [])
-    else
-        return PyTreeNode(string(expr), [])
+    function children(self, node)
+        return node.children
     end
 end
 
-function pytree_to_expr(node)
-    # Convert leaf node
-    if isempty(node.children)
-        try
-            return Meta.parse(node.name)
-        catch
-            return Symbol(node.name)
-        end
-    end
-
-    head = Symbol(node.name)
-    args = [pytree_to_expr(c) for c in node.children]
-    return Expr(head, args...)
-end
-
-function rename_cost(n1::PyTreeNode, n2::PyTreeNode)
-    return n1.label == n2.label ? 0 : 1
-end
-
-insert_cost(node::PyTreeNode) = 1
-delete_cost(node::PyTreeNode) = 1
 
 function all_pairs(v1::Vector, v2::Vector)
     return [(x, y) for x in v1, y in v2]
 end
 
-function get_descendants(expr::Expr)
-    result = []
-    for arg in expr.args
-        if arg isa Expr
-            push!(result, arg)
-        end
-    end
-    return result
+mutable struct TreeNode
+    label::Any
+    children::Vector{TreeNode}
 end
 
-function get_descendants(t::PyTreeNode)
-    result = []
-    for arg in t.children
-        push!(result, arg)
-    end
-    return result
-end
-
-function has_same_label_and_value(expr1::Symbol, expr2::Symbol)
-    return expr1 == expr2
-end
-
-function has_same_label_and_value(expr1::Expr, expr2::Expr)
-    if expr1.head != expr2.head
-        return false
-    end
-
-    for (arg1, arg2) in zip(expr1.args, expr2.args)
-        if arg1 != arg2
-            return false
-        end
-    end
-
-    return true
-end
-
-function has_same_label_and_value(t1::PyTreeNode, t2::PyTreeNode)
-    if t1.name != t2.name
-        return false
-    end
-
-    for (arg1, arg2) in zip(t1.children, t2.children)
-        if arg1 != arg2
-            return false
-        end
-    end
-
-    return true
-end
-
-function get_height(node)
-    height = 0
-    q = Queue{Union{typeof(node), Nothing}}()
-    enqueue!(q, node)
-    enqueue!(q, nothing)
-    while !isempty(q)
-        curr = dequeue!(q)
-        if curr === nothing
-            height += 1
-            if !isempty(q)
-                enqueue!(q, nothing)
-            end
-        else
-            for child in get_descendants(curr)
-                enqueue!(q, child)
-            end
-        end
-    end
-    return height
-end
-
-function peek_max(l)
-    if isempty(l)
-        return -1
+function expr_to_treenode(expr)::TreeNode
+    if expr isa Expr
+        children = [expr_to_treenode(arg) for arg in expr.args]
+        return TreeNode(string(expr.head), children)
+    elseif expr isa Symbol
+        return TreeNode(string(expr), [])
     else
-        return maximum(keys(l))
+        return TreeNode(expr, [])
     end
 end
 
-function isomorphic(t1::Expr, t2::Expr)
-    if !has_same_label_and_value(t1, t2)
-        return false
+# Height calculation function for a tree node
+function height(node::TreeNode)
+    if isempty(node.children)
+        return 1
+    else
+        return 1 + maximum(height(child) for child in node.children)
     end
+end
 
-    t1_children = t1.args
-    t2_children = t2.args
-
-    if length(t1_children) != length(t2_children)
-        return false
-    end
-
-    for (c1, c2) in zip(t1_children, t2_children)
-        if c1 isa Expr && c2 isa Expr
-           if !isomorphic(c1, c2)
-               return false
-           end
+# Utility function to open a node and add its children to the priority list
+function open(node::TreeNode, L::Dict{Int, Vector{TreeNode}})
+    for child in node.children
+        if haskey(L, height(child))
+            push!(L[height(child)], child)
+        else
+            L[height(child)] = [child]
         end
     end
-    return true
 end
 
-function isomorphic(t1::PyTreeNode, t2::PyTreeNode)
-    if !has_same_label_and_value(t1, t2)
-        return false
-    end
-
-    t1_children = t1.children
-    t2_children = t2.children
-
-    if length(t1_children) != length(t2_children)
-        return false
-    end
-
-    for (c1, c2) in zip(t1_children, t2_children)
-        if !isomorphic(c1, c2)
-            return false
-        end
-    end
-    return true
-end
-
-function open(node, priority_list)
-    height = get_height(node)
-    if !haskey(priority_list, height)
-        priority_list[height] = Vector{typeof(node)}()
-    end
-    append!(priority_list[height], get_descendants(node))
-end
-
-function pop(l)
-    max_height = peek_max(l)
-    return pop!(l, max_height, Vector{Any}())
-end
-
-function make_height_indexed_list(t, l)
-    l[get_height(t)] = [t]
-    for child in get_descendants(t)
-        make_height_indexed_list(child, l)
-    end
+# Function to check isomorphism between two trees
+function isomorphic(t1::TreeNode, t2::TreeNode)
+    return t1.label == t2.label && length(t1.children) == length(t2.children)
 end
 
 function dice(t1, t2, M)
@@ -203,18 +75,58 @@ function dice(t1, t2, M)
     end
 end
 
+function peek(l::Dict{Int, Vector{TreeNode}})
+    if isempty(l)
+        return -1
+    else
+        return maximum(keys(l))
+    end
+end
+
+function pop(l)
+    max_height = peek(l)
+    return pop!(l, max_height, Vector{Any}())
+end
+
+function push(l, height, t)
+    if haskey(l, height)
+        push!(l[height], t)
+    else
+        l[height] = [t]
+    end
+end
+
+function get_descendants(T::TreeNode)
+    result = []
+    for child in T.children
+        push!(result, child)
+        append!(result, get_descendants(child))
+    end
+    return result
+end
+
+function make_height_indexed_list(t, l::Dict{Int64, Vector{TreeNode}})
+    l[height(t)] = [t]
+    for child in get_descendants(t)
+        make_height_indexed_list(child, l)
+    end
+end
+
 function top_down(T1, T2, minHeight=1)
-    L1 = Dict{Int, Vector{typeof(T1)}}()
-    L2 = Dict{Int, Vector{typeof(T2)}}()
-    A = Vector{Tuple{typeof(T1), typeof(T2)}}()
-    M = Set{Tuple{typeof(T1), typeof(T2)}}()
+    # Priority Queue for height-indexed priority lists
+    L1 = Dict{Int, Vector{TreeNode}}()
+    L2 = Dict{Int, Vector{TreeNode}}()
+
+    # Candidate mappings and final set of mappings
+    A = []  # List of candidate mappings
+    M = Set()  # Set of final mappings
 
     make_height_indexed_list(T1, L1)
     make_height_indexed_list(T2, L2)
 
-    while min(peek_max(L1), peek_max(L2)) >= minHeight # should be >
-        if peek_max(L1) != peek_max(L2)
-            if peek_max(L1) > peek_max(L2)
+    while min(peek(L1), peek(L2)) > minHeight
+        if peek(L1) != peek(L2)
+            if peek(L1) > peek(L2)
                 for t in pop(L1)
                     open(t, L1)
                 end
@@ -226,10 +138,31 @@ function top_down(T1, T2, minHeight=1)
         else
             H1 = pop(L1)
             H2 = pop(L2)
-            println(H1, " ", H2)
             for (t1, t2) in all_pairs(H1, H2)
                 if isomorphic(t1, t2)
-                    push!(A, (t1, t2))
+                    for tx in get_descendants(T2)
+                        if isomorphic(t1, tx) && tx != t2
+                            if !(isempty(t1.children) && isempty(t2.children))
+                                push!(A, (t1, t2))
+                                break
+                            end
+                        end
+                    end
+                    for tx in get_descendants(T1)
+                        if isomorphic(tx, t2) && tx != t1
+                            if !(isempty(t1.children) && isempty(t2.children))
+                                push!(A, (t1, t2))
+                                break
+                            end
+                        end
+                    end
+                    for st1 in get_descendants(t1), st2 in get_descendants(t2)
+                        if isomorphic(st1, st2)
+                            if !(isempty(st1.children) && isempty(st2.children))
+                                push!(M, (st1, st2))
+                            end
+                        end
+                    end
                 end
             end
 
@@ -246,11 +179,13 @@ function top_down(T1, T2, minHeight=1)
         end
     end
 
-    sort!(A, by = x -> -dice(x[1], x[2], M))
+    # Sorting A using the dice function
+    sort!(A, by = x -> dice(x[1], x[2], M))
+
     while !isempty(A)
         (t1, t2) = popfirst!(A)
+        A = filter(x -> x[1] != t1 && x[2] != t2, A)
         push!(M, (t1, t2))
-        A = [pair for pair in A if pair[1] != t1 && pair[2] != t2]
     end
 
     return M
@@ -294,45 +229,29 @@ function get_unmatched_nodes_in_postorder(T, M)
 end
 
 function opt(t1, t2)
-    py_t1 = expr_to_pytree(t1)
-    py_t2 = expr_to_pytree(t2)
-    ed = apted.APTED(py_t1, py_t2)
-    mapping = ed.compute_edit_mapping()
+    apt = apted.APTED(t1, t2, CustomConfig())
+    mapping = apt.compute_edit_mapping()
     return mapping
-end
-
-function ast_label(node)
-    if isa(node, Expr)
-        return string(node.head)
-    elseif isa(node, Symbol)
-        return string(node)
-    elseif node === nothing
-        return "nothing"
-    else
-        return string(node)  # for literals like numbers or strings
-    end
 end
 
 function bottom_up(T1, T2, M, minDice=0.5, maxSize=100)
     for t1 in get_unmatched_nodes_in_postorder(T1, M)
         candidates = []
         for c in get_unmatched_nodes(T2, M)
-            if has_same_label_and_value(t1, c) # && has_matched_children(c)
+            if t1.label == c.label # && has_matched_children(c)
                 push!(candidates, c)
             end
         end
 
         for t2 in candidates
             d = dice(t1, t2, M)
-            if dice(t1, t2, M) > minDice # or >?
+            if dice(t1, t2, M) > minDice
                 push!(M, (t1, t2))
                 if maximum([length(get_descendants(t1)), length(get_descendants(t2))]) < maxSize
                     R = opt(t1, t2)
                     for (ta, tb) in R
-                        j_ta = pytree_to_expr(ta)
-                        j_tb = pytree_to_expr(tb)
-                        if ast_label(ta) == ast_label(t2)
-                            push!(M, (j_ta, j_tb))
+                        if ta == tb
+                            push!(M, (ta, tb))
                         end
                     end
                 end
@@ -343,39 +262,29 @@ function bottom_up(T1, T2, M, minDice=0.5, maxSize=100)
     return M
 end
 
-function test_apted()
-    # Define your Julia expressions
-    ex1 = :(a + b)
-    ex2 = :(a - b)
+ex1 = :(function foo(a, b)
+            if a == 1
+                return b
+            end
+            x = 1
+            y = 3
+        end)
+ex2 = :(function foo(a, b)
+            if a == 1
+                return b
+            else
+                x = 1
+                if x < 100
+                    y = 2
+                    foo()
+                end
+            end
+            return b
+        end)
 
-    # Convert Julia expressions to PyTreeNode structures
-    tree1 = expr_to_pytree(ex1)
-    tree2 = expr_to_pytree(ex2)
+t1 = expr_to_treenode(ex1)
+t2 = expr_to_treenode(ex2)
 
-    # Create an APTED instance and compute the edit distance
-    apt = apted.APTED(tree1, tree2)
-    distance = apt.compute_edit_distance()
-    println("Edit distance: ", distance)
-
-    mapping = apt.compute_edit_mapping()
-    for (t1, t2) in mapping
-        jt1 = pytree_to_expr(t1)
-        jt2 = pytree_to_expr(t2)
-        println("Mapping (converted): ", jt1, " : ", jt2)
-    end
-end
-
-function test_bottom_up()
-    ex1 = :(x = 1; y = 2)
-    ex2 = :(x = 1; y = 3)
-
-    t1 = expr_to_pytree(ex1)
-    t2 = expr_to_pytree(ex2)
-
-    M = top_down(t1, t2, 1)
-    println(M)
-    M = bottom_up(t1, t2, M)
-    println(M)
-end
-
-test_bottom_up()
+M = top_down(t1, t2, 1)
+M = bottom_up(t1, t2, M, 0.5, 100)
+println(M)
