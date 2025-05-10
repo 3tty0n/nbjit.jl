@@ -52,7 +52,7 @@ end
 function treenode_to_expr(node)
     if node isa Node
         children = [treenode_to_expr(child) for child in node.children]
-        return Expr(node.label, children)
+        return Expr(node.label, children...)
     else
         return node.label
     end
@@ -322,7 +322,12 @@ end
 
 function print_mapping(M)
     for (t1, t2) in M
-        println(t1, "\nmaps to\n", t2, "\n")
+        println(
+            t1,
+            "\nmaps to\n",
+            t2,
+            "\n"
+        )
     end
 end
 
