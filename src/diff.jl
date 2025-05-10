@@ -354,4 +354,10 @@ t2 = expr_to_treenode(ex2)
 
 M = top_down(t1, t2, 2)
 M = bottom_up(t1, t2, M, 0.5, 100)
-print_mapping(M)
+
+N = []
+for (t1, t2) in M
+    push!(N, (treenode_to_expr(t1), treenode_to_expr(t2)))
+end
+
+print_mapping(N)
