@@ -27,12 +27,16 @@ mutable struct TreeNode
     children::Vector{TreeNode}
 end
 
+function is_leaf(node)
+    return isempty(node.children)
+end
+
 function expr_to_treenode(expr)::TreeNode
     if expr isa Expr
         children = [expr_to_treenode(arg) for arg in expr.args]
-        return TreeNode(string(expr.head), children)
-    elseif expr isa Symbol
-        return TreeNode(string(expr), [])
+        return TreeNode(expr.head, children)
+    elseif isprimitivetype(expr)
+        return TreeNode(expr, [])
     else
         return TreeNode(expr, [])
     end
@@ -47,9 +51,9 @@ function height(node::TreeNode)
     end
 end
 
-# Utility function to open a node and add its children to the priority list
+# open(t, l) inserts all the children of t into l
 function open(node::TreeNode, L::Dict{Int, Vector{TreeNode}})
-    for child in node.children
+    for child in get_descendants(node)
         if haskey(L, height(child))
             push!(L[height(child)], child)
         else
@@ -60,7 +64,29 @@ end
 
 # Function to check isomorphism between two trees
 function isomorphic(t1::TreeNode, t2::TreeNode)
-    return t1.label == t2.label && length(t1.children) == length(t2.children)
+    if is_leaf(t1) || is_leaf(t2)
+        return false
+    end
+
+    if t1.label != t2.label
+        return false
+    end
+
+    if length(t1.children) != length(t2.children)
+        return false
+    end
+
+    for (c1, c2) in zip(t1.children, t2.children)
+        # TODO: should we check all children?
+        # if !isomorphic(c1, c2)
+        #     return false
+        # end
+        if c1.label != c2.label
+            return false
+        end
+    end
+
+    return true
 end
 
 function dice(t1, t2, M)
@@ -99,7 +125,9 @@ end
 function get_descendants(T::TreeNode)
     result = []
     for child in T.children
-        push!(result, child)
+        if !(child in result)
+            push!(result, child)
+        end
         append!(result, get_descendants(child))
     end
     return result
@@ -112,7 +140,7 @@ function make_height_indexed_list(t, l::Dict{Int64, Vector{TreeNode}})
     end
 end
 
-function top_down(T1, T2, minHeight=1)
+function top_down(T1, T2, minHeight=2)
     # Priority Queue for height-indexed priority lists
     L1 = Dict{Int, Vector{TreeNode}}()
     L2 = Dict{Int, Vector{TreeNode}}()
@@ -121,8 +149,10 @@ function top_down(T1, T2, minHeight=1)
     A = []  # List of candidate mappings
     M = Set()  # Set of final mappings
 
-    make_height_indexed_list(T1, L1)
-    make_height_indexed_list(T2, L2)
+    # make_height_indexed_list(T1, L1)
+    # make_height_indexed_list(T2, L2)
+    push(L1, height(T1), T1)
+    push(L2, height(T2), T2)
 
     while min(peek(L1), peek(L2)) > minHeight
         if peek(L1) != peek(L2)
@@ -138,27 +168,26 @@ function top_down(T1, T2, minHeight=1)
         else
             H1 = pop(L1)
             H2 = pop(L2)
+
             for (t1, t2) in all_pairs(H1, H2)
                 if isomorphic(t1, t2)
                     for tx in get_descendants(T2)
                         if isomorphic(t1, tx) && tx != t2
-                            if !(isempty(t1.children) && isempty(t2.children))
+                            if !is_leaf(t1) && !is_leaf(t2)
                                 push!(A, (t1, t2))
-                                break
                             end
                         end
                     end
                     for tx in get_descendants(T1)
                         if isomorphic(tx, t2) && tx != t1
-                            if !(isempty(t1.children) && isempty(t2.children))
+                            if !is_leaf(t1) && !is_leaf(t2)
                                 push!(A, (t1, t2))
-                                break
                             end
                         end
                     end
                     for st1 in get_descendants(t1), st2 in get_descendants(t2)
                         if isomorphic(st1, st2)
-                            if !(isempty(st1.children) && isempty(st2.children))
+                            if !is_leaf(t1) && !is_leaf(t2)
                                 push!(M, (st1, st2))
                             end
                         end
@@ -167,12 +196,13 @@ function top_down(T1, T2, minHeight=1)
             end
 
             for t1 in H1
-                if !any((t1, x) in A || (t1, x) in M for x in H2)
+                if !any((t1, tx) in union(A, M) for tx in H2)
                     open(t1, L1)
                 end
             end
+
             for t2 in H2
-                if !any((x, t2) in A || (x, t2) in M for x in H1)
+                if !any((tx, t2) in union(A, M) for tx in H1)
                     open(t2, L2)
                 end
             end
@@ -228,6 +258,17 @@ function get_unmatched_nodes_in_postorder(T, M)
     return result
 end
 
+function has_matched_children(T, M)
+    for child in get_descendants(T)
+        if contains(child, M)
+            return true
+        end
+        has_matched_children(child, M)
+    end
+
+    return false
+end
+
 function opt(t1, t2)
     apt = apted.APTED(t1, t2, CustomConfig())
     mapping = apt.compute_edit_mapping()
@@ -238,20 +279,24 @@ function bottom_up(T1, T2, M, minDice=0.5, maxSize=100)
     for t1 in get_unmatched_nodes_in_postorder(T1, M)
         candidates = []
         for c in get_unmatched_nodes(T2, M)
-            if t1.label == c.label # && has_matched_children(c)
+            if t1.label == c.label && has_matched_children(c, M)
                 push!(candidates, c)
             end
         end
 
         for t2 in candidates
             d = dice(t1, t2, M)
-            if dice(t1, t2, M) > minDice
-                push!(M, (t1, t2))
+            if d > minDice
+                if !is_leaf(t1) && !is_leaf(t2)
+                    push!(M, (t1, t2))
+                end
                 if maximum([length(get_descendants(t1)), length(get_descendants(t2))]) < maxSize
                     R = opt(t1, t2)
                     for (ta, tb) in R
                         if ta == tb
-                            push!(M, (ta, tb))
+                            if !is_leaf(ta) && !is_leaf(tb)
+                                push!(M, (ta, tb))
+                            end
                         end
                     end
                 end
@@ -262,29 +307,36 @@ function bottom_up(T1, T2, M, minDice=0.5, maxSize=100)
     return M
 end
 
-ex1 = :(function foo(a, b)
-            if a == 1
-                return b
-            end
-            x = 1
-            y = 3
-        end)
-ex2 = :(function foo(a, b)
-            if a == 1
-                return b
-            else
-                x = 1
-                if x < 100
-                    y = 2
-                    foo()
-                end
-            end
-            return b
-        end)
+function print_mapping(M)
+    for (t1, t2) in M
+        println(t1, "\nmaps to\n", t2, "\n")
+    end
+end
+
+ex1 = Meta.parse("""
+function foo()
+    x = 1
+    y = 2
+    if x < 1
+        z = 3
+        z = 3
+    end
+end""")
+
+ex2 = Meta.parse("""
+function foo()
+    x = 1
+    y = 2
+    if x <= 1
+        z = 3
+        z = 293
+    end
+end""")
+
 
 t1 = expr_to_treenode(ex1)
 t2 = expr_to_treenode(ex2)
 
-M = top_down(t1, t2, 1)
+M = top_down(t1, t2, 2)
 M = bottom_up(t1, t2, M, 0.5, 100)
-println(M)
+print_mapping(M)
