@@ -13,38 +13,54 @@ apted = pyimport("apted")
     end
 
     function children(self, node)
-        return node.children
+        if node isa Node
+            return node.children
+        else
+            return []
+        end
     end
 end
-
 
 function all_pairs(v1::Vector, v2::Vector)
     return [(x, y) for x in v1, y in v2]
 end
 
-mutable struct TreeNode
-    label::Any
-    children::Vector{TreeNode}
+abstract type Tree end
+
+struct Node <: Tree
+    label
+    children
+end
+
+struct Value <: Tree
+    label
 end
 
 function is_leaf(node)
-    return isempty(node.children)
+    return !(node isa Node)
 end
 
-function expr_to_treenode(expr)::TreeNode
+function expr_to_treenode(expr)
     if expr isa Expr
         children = [expr_to_treenode(arg) for arg in expr.args]
-        return TreeNode(expr.head, children)
-    elseif isprimitivetype(expr)
-        return TreeNode(expr, [])
+        return Node(expr.head, children)
     else
-        return TreeNode(expr, [])
+        return Value(expr)
+    end
+end
+
+function treenode_to_expr(node)
+    if node isa Node
+        children = [treenode_to_expr(child) for child in node.children]
+        return Expr(node.label, children)
+    else
+        return node.label
     end
 end
 
 # Height calculation function for a tree node
-function height(node::TreeNode)
-    if isempty(node.children)
+function height(node)
+    if !(node isa Node)
         return 1
     else
         return 1 + maximum(height(child) for child in node.children)
@@ -52,8 +68,11 @@ function height(node::TreeNode)
 end
 
 # open(t, l) inserts all the children of t into l
-function open(node::TreeNode, L::Dict{Int, Vector{TreeNode}})
+function open(node, L::Dict{Int, Vector{Tree}})
     for child in get_descendants(node)
+        if is_leaf(child)
+            continue
+        end
         if haskey(L, height(child))
             push!(L[height(child)], child)
         else
@@ -63,9 +82,9 @@ function open(node::TreeNode, L::Dict{Int, Vector{TreeNode}})
 end
 
 # Function to check isomorphism between two trees
-function isomorphic(t1::TreeNode, t2::TreeNode)
-    if is_leaf(t1) || is_leaf(t2)
-        return false
+function isomorphic(t1, t2)
+    if !(t1 isa Node && t2 isa Node)
+        return t1.label == t2.label
     end
 
     if t1.label != t2.label
@@ -101,7 +120,7 @@ function dice(t1, t2, M)
     end
 end
 
-function peek(l::Dict{Int, Vector{TreeNode}})
+function peek(l::Dict{Int, Vector{Tree}})
     if isempty(l)
         return -1
     else
@@ -122,7 +141,11 @@ function push(l, height, t)
     end
 end
 
-function get_descendants(T::TreeNode)
+function get_descendants(T)
+    if !(T isa Node)
+        return []
+    end
+
     result = []
     for child in T.children
         if !(child in result)
@@ -133,7 +156,7 @@ function get_descendants(T::TreeNode)
     return result
 end
 
-function make_height_indexed_list(t, l::Dict{Int64, Vector{TreeNode}})
+function make_height_indexed_list(t, l::Dict{Int64, Vector{Tree}})
     l[height(t)] = [t]
     for child in get_descendants(t)
         make_height_indexed_list(child, l)
@@ -142,8 +165,8 @@ end
 
 function top_down(T1, T2, minHeight=2)
     # Priority Queue for height-indexed priority lists
-    L1 = Dict{Int, Vector{TreeNode}}()
-    L2 = Dict{Int, Vector{TreeNode}}()
+    L1 = Dict{Int, Vector{Tree}}()
+    L2 = Dict{Int, Vector{Tree}}()
 
     # Candidate mappings and final set of mappings
     A = []  # List of candidate mappings
@@ -173,23 +196,17 @@ function top_down(T1, T2, minHeight=2)
                 if isomorphic(t1, t2)
                     for tx in get_descendants(T2)
                         if isomorphic(t1, tx) && tx != t2
-                            if !is_leaf(t1) && !is_leaf(t2)
-                                push!(A, (t1, t2))
-                            end
+                            push!(A, (t1, t2))
                         end
                     end
                     for tx in get_descendants(T1)
                         if isomorphic(tx, t2) && tx != t1
-                            if !is_leaf(t1) && !is_leaf(t2)
-                                push!(A, (t1, t2))
-                            end
+                            push!(A, (t1, t2))
                         end
                     end
                     for st1 in get_descendants(t1), st2 in get_descendants(t2)
-                        if isomorphic(st1, st2)
-                            if !is_leaf(t1) && !is_leaf(t2)
-                                push!(M, (st1, st2))
-                            end
+                        if isomorphic(st1, st2) && !is_leaf(st1) && !is_leaf(st2)
+                            push!(M, (st1, st2))
                         end
                     end
                 end
@@ -214,7 +231,7 @@ function top_down(T1, T2, minHeight=2)
 
     while !isempty(A)
         (t1, t2) = popfirst!(A)
-        A = filter(x -> x[1] != t1 && x[2] != t2, A)
+        A = filter(x -> x[1] != t1 && x[2] != t2 && !is_leaf(t1) && !is_leaf(t2), A)
         push!(M, (t1, t2))
     end
 
@@ -244,7 +261,7 @@ function get_unmatched_nodes(T, M)
     for child in get_descendants(T)
         append!(result, get_unmatched_nodes_in_postorder(child, M))
     end
-    result
+    return result
 end
 
 function get_unmatched_nodes_in_postorder(T, M)
@@ -287,16 +304,12 @@ function bottom_up(T1, T2, M, minDice=0.5, maxSize=100)
         for t2 in candidates
             d = dice(t1, t2, M)
             if d > minDice
-                if !is_leaf(t1) && !is_leaf(t2)
-                    push!(M, (t1, t2))
-                end
+                push!(M, (t1, t2))
                 if maximum([length(get_descendants(t1)), length(get_descendants(t2))]) < maxSize
                     R = opt(t1, t2)
                     for (ta, tb) in R
                         if ta == tb
-                            if !is_leaf(ta) && !is_leaf(tb)
-                                push!(M, (ta, tb))
-                            end
+                            push!(M, (ta, tb))
                         end
                     end
                 end
@@ -328,7 +341,9 @@ function foo()
     x = 1
     y = 2
     if x <= 1
-        z = 3
+        z = 4
+        z = 5
+        z = 6
         z = 293
     end
 end""")
