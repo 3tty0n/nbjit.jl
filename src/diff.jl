@@ -323,6 +323,44 @@ function bottom_up(T1, T2, M, minDice=0.5, maxSize=100)
     return M
 end
 
+function create_env_from_mapping(expr, env)
+    function get_value(sym::Symbol, env::Dict)
+        return env[sym]
+    end
+
+    function get_value(val, env::Dict)
+        return val
+    end
+
+
+    if expr isa Expr
+        if expr.head == :(=)
+            args = expr.args
+            lhs = create_env_from_mapping(args[1], env)
+            rhs = create_env_from_mapping(args[2], env)
+            if lhs isa Vector
+                for (l, r) in zip(lhs, rhs)
+                    env[l] = r
+                end
+            else
+                env[lhs] = rhs
+            end
+        elseif expr.head == :tuple
+            return [create_env_from_mapping(arg, env) for arg in expr.args]
+        # elseif expr.head == :call
+        #     args = expr.args
+        #     if args[1] in [:+, :-, :*, :/]
+        #         lhs = create_env_from_mapping(args[2])
+        #         rhs = create_env_from_mapping(args[3])
+        #         result = Base._apply(args[1], lhs, rhs)
+        #         return result
+        #     end
+        end
+    else
+        return expr
+    end
+end
+
 function print_mapping(M)
     for (t1, t2) in M
         println(
@@ -333,39 +371,3 @@ function print_mapping(M)
         )
     end
 end
-
-ex1 = Meta.parse("""
-function foo()
-    x = 1
-    y = 2
-    if x < 1
-        z = 3
-        z = 3
-    end
-end""")
-
-ex2 = Meta.parse("""
-function foo()
-    x = 1
-    y = 2
-    if x <= 1
-        z = 4
-        z = 5
-        z = 6
-        z = 293
-    end
-end""")
-
-
-t1 = expr_to_treenode(ex1)
-t2 = expr_to_treenode(ex2)
-
-M = top_down(t1, t2, 2)
-M = bottom_up(t1, t2, M, 0.5, 100)
-
-N = []
-for (t1, t2) in M
-    push!(N, (treenode_to_expr(t1), treenode_to_expr(t2)))
-end
-
-print_mapping(N)
