@@ -97,11 +97,14 @@ function isomorphic(t1, t2)
 
     for (c1, c2) in zip(t1.children, t2.children)
         # TODO: should we check all children?
-        # if !isomorphic(c1, c2)
-        #     return false
-        # end
-        if c1.label != c2.label
-            return false
+        if c1 isa Node && c2 isa Node
+            if c1.label != c2.label || length(c1.children) != length(c1.children)
+                return false
+            end
+        else
+            if c1.label != c2.label
+                return false
+            end
         end
     end
 
