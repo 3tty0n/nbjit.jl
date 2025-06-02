@@ -323,21 +323,12 @@ function bottom_up(T1, T2, M, minDice=0.5, maxSize=100)
     return M
 end
 
-function create_env_from_mapping(expr, env)
-    function get_value(sym::Symbol, env::Dict)
-        return env[sym]
-    end
-
-    function get_value(val, env::Dict)
-        return val
-    end
-
-
+function extract_env(expr, env)
     if expr isa Expr
         if expr.head == :(=)
             args = expr.args
-            lhs = create_env_from_mapping(args[1], env)
-            rhs = create_env_from_mapping(args[2], env)
+            lhs = extract_env(args[1], env)
+            rhs = extract_env(args[2], env)
             if lhs isa Vector
                 for (l, r) in zip(lhs, rhs)
                     env[l] = r
@@ -346,7 +337,7 @@ function create_env_from_mapping(expr, env)
                 env[lhs] = rhs
             end
         elseif expr.head == :tuple
-            return [create_env_from_mapping(arg, env) for arg in expr.args]
+            return [extract_env(expr, env) for arg in expr.args]
         # elseif expr.head == :call
         #     args = expr.args
         #     if args[1] in [:+, :-, :*, :/]
@@ -359,6 +350,14 @@ function create_env_from_mapping(expr, env)
     else
         return expr
     end
+end
+
+function create_env_from_mapping(N)
+    env = Dict()
+    for (n1, n2) in N
+        extract_env(n2, env)
+    end
+    return env
 end
 
 function print_mapping(M)
