@@ -1,6 +1,4 @@
-tbl_func = Dict{String, Expr}()
-
-id = -1
+tbl_func = Dict{Symbol, Expr}()
 
 const id_ref = Ref(-1)
 
