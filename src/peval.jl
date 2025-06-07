@@ -105,13 +105,13 @@ function simplify_function(code, const_map)
 end
 
 function create_entry(code, const_map)
-    folded_ast = simplify_function(code, const_map)
+    @show folded_ast = simplify_function(code, const_map)
     fname = Symbol(gen_func_id())
-    body = nothing
     func_expr = quote
         function $(fname)(args...)
-            $(body)
+            $(folded_ast.args[2])
         end
     end
+    tbl_func[fname] = func_expr
     return func_expr
 end
