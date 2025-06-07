@@ -1,3 +1,11 @@
+tbl_func = Dict{String, Expr}()
+
+id = -1
+
+function gen_func_id()
+    id += 1
+    return "func_$(id)"
+end
 
 function is_constant(expr)
     return expr isa Number || expr == :(true) || expr == :(false)
@@ -92,6 +100,18 @@ end
 
 function simplify_function(code, const_map)
     ast = Meta.parse(code)
-    simplified_ast = partial_evaluate(ast, const_map)
-    return simplified_ast
+    folded_ast = partial_evaluate(ast, const_map)
+    return folded_ast
+end
+
+function create_entry(code, const_map)
+    folded_ast = simplify_function(code, const_map)
+    fname = Symbol(gen_func_id())
+    body = nothing
+    func_expr = quote
+        function $(fname)(args...)
+            $(body)
+        end
+    end
+    return func_expr
 end
