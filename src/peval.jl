@@ -2,9 +2,11 @@ tbl_func = Dict{String, Expr}()
 
 id = -1
 
+const id_ref = Ref(-1)
+
 function gen_func_id()
-    id += 1
-    return "func_$(id)"
+    id_ref[] += 1
+    return "func_$(id_ref[])"
 end
 
 function is_constant(expr)
