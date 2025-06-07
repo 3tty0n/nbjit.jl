@@ -64,6 +64,9 @@ end"""
     println("\nSimplified Code:")
     println(Meta.show_sexpr(simplified))
 
+    func = create_entry(code1, env)
+    println(func)
+
     return true
 end
 
