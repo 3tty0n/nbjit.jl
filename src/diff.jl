@@ -352,6 +352,8 @@ function extract_env(expr, env)
     end
 end
 
+# create an environment used for peval
+# the environemnt maps the `static' variable to its value
 function create_env_from_mapping(N)
     env = Dict()
     for (n1, n2) in N
