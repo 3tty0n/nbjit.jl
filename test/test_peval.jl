@@ -37,11 +37,10 @@ end"""
 
     code2 = """
 function f(x, y)
-    z = 3
     if x <= 1
-        x = x + 2
+        x = x + 10
     end
-    return x + y + z
+    return x + y
 end"""
 
     t1 = expr_to_treenode(Meta.parse(code1))
@@ -57,14 +56,18 @@ end"""
         push!(N, (expr1, expr2))
     end
     env = create_env_from_mapping(N)
-    env[:x] = :(1)
-    simplified = simplify_function(code1, env)
-    println("Simplified Function AST:")
-    println(simplified)
-    println("\nSimplified Code:")
-    println(Meta.show_sexpr(simplified))
+    println("Created env:")
+    println(env)
 
-    func = create_entry(code1, env)
+    env[:x] = :(1)
+    # simplified = simplify_function(code1, env)
+    # println("\nSimplified Function AST:")
+    # println(simplified)
+    # println("\nSimplified Code:")
+    # println(Meta.show_sexpr(simplified))
+
+    func = create_entry(code2, env)
+    println("\nCreated function entry")
     println(func)
 
     return true
