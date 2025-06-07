@@ -33,15 +33,11 @@ end""")
     M = bottom_up(t1, t2, M, 0.5, 100)
 
     N = []
-    env = Dict()
     for (t1, t2) in M
         push!(N, (treenode_to_expr(t1), treenode_to_expr(t2)))
-
-        create_env_from_mapping(treenode_to_expr(t2), env)
     end
 
-    # print_mapping(N)
-
+    env = create_env_from_mapping(N)
     return env == Dict(:y => 2, :x => 1)
 end
 
