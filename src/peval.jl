@@ -104,14 +104,34 @@ function simplify_function(code, const_map)
     return folded_ast
 end
 
+function collect_variables(expr, const_map)
+    vars = Set{Symbol}()
+    function traverse(e)
+        if e isa Symbol
+            if haskey(const_map, e)
+                push!(vars, e)
+            end
+        elseif e isa Expr
+            for arg in e.args
+                traverse(arg)
+            end
+        end
+    end
+    traverse(expr)
+    return vars
+end
+
 function create_entry(code, const_map)
     @show folded_ast = simplify_function(code, const_map)
+    @show unfolded_vars = collect_variables(folded_ast, const_map)
     fname = Symbol(gen_func_id())
     func_expr = quote
         function $(fname)(args...)
             $(folded_ast.args[2])
         end
     end
+    # TODO: inesrt guards by the types of
+    # un-folded (dynamic = edited) variables
     tbl_func[fname] = func_expr
     return func_expr
 end
