@@ -106,17 +106,39 @@ end
 
 function collect_variables(expr, const_map)
     vars = Set{Symbol}()
+    known_locals = Set{Symbol}() # Variables defined within the function body (e.g., via x = ...)
+
     function traverse(e)
-        if e isa Symbol
-            if haskey(const_map, e)
-                push!(vars, e)
+        if e isa Expr
+            if e.head == :call
+                # e.args[1] is the function name, IGNORE IT.
+                # Recursively traverse only the function's
+                # arguments (args[2] onwards).
+                for arg in e.args[2:end]
+                    traverse(arg)
+                end
+
+            # Track variables defined in assignments
+            elseif e.head == :(=) && e.args[1] isa Symbol
+                push!(known_locals, e.args[1])
+                # Only traverse the right-hand side for variables
+                traverse(e.args[2])
+            else
+                # For any other expression type
+                # (:if, :block, etc.), traverse all children
+                for arg in e.args
+                    traverse(arg)
+                end
             end
-        elseif e isa Expr
-            for arg in e.args
-                traverse(arg)
+        elseif e isa Symbol
+            # A symbol is a dynamic variable if it's not a known constant,
+            # not defined locally, and not a built-in function (like `>`).
+            if !haskey(const_map, e) && !(e in known_locals) && !isdefined(Base, e) && !isdefined(Core, e)
+                push!(vars, e)
             end
         end
     end
+
     traverse(expr)
     return vars
 end
@@ -126,7 +148,7 @@ function create_entry(code, const_map)
     @show unfolded_vars = collect_variables(folded_ast, const_map)
     fname = Symbol(gen_func_id())
     func_expr = quote
-        function $(fname)(args...)
+        function $(fname)($(unfolded_vars...))
             $(folded_ast.args[2])
         end
     end
