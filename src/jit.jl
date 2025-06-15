@@ -98,9 +98,8 @@ function codegen(cg::CodeGen, expr::Expr)
                 current_scope(cg)[argname] = alloc
             end
 
-            body = codegen(cg, expr.args[2])
-
-            LLVM.ret!(cg.builder, body)
+            codegen(cg, expr.args[2])
+            #LLVM.ret!(cg.builder, body)
             LLVM.verify(func)
         end
         return func
@@ -116,6 +115,7 @@ function codegen(cg::CodeGen, expr::Expr)
     elseif expr.head == :return
         rhs = expr.args[1]
         retval = codegen(cg, rhs)
+        LLVM.ret!(cg.builder, retval)
         return retval
     end
 end
