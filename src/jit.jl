@@ -41,8 +41,14 @@ function codegen(cg::CodeGen, expr::Expr)
         local V
         var = string(expr.args[1])
         initval = codegen(cg, expr.args[2])
-        V = LLVM.GlobalVariable(cg.mod, LLVM.IntType(64), var)
-        LLVM.initializer!(V, initval)
+        if isglobalscope(current_scope(cg))
+            V = LLVM.GlobalVariable(cg.mod, LLVM.IntType(64), var)
+            LLVM.initializer!(V, initval)
+        else
+            func = LLVM.parent(LLVM.position(cg.builder))
+            V = create_entry_block_allocation(cg, func, var)
+            LLVM.store!(cg.builder, initval, V)
+        end
         current_scope(cg)[var] = V
         return initval
     elseif expr.head == :call
@@ -129,7 +135,7 @@ function create_entry_block_allocation(cg::CodeGen, fn::LLVM.Function, varname::
         else
             LLVM.position!(builder, first(LLVM.instructions(entry_block)))
         end
-        alloc = LLVM.allocate!(builder, LLVM.IntType(64), varname)
+        alloc = LLVM.alloca!(builder, LLVM.IntType(64), varname)
     end
     return alloc
 end
@@ -158,4 +164,4 @@ function run(code::String, entry::String)
     return res_jl
 end
 
-run("function entry() x=1; return x+2 end", "entry")
+run("function entry() x=1; y=x+1; return y+2 end", "entry")
