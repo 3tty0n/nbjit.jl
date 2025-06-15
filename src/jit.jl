@@ -47,12 +47,25 @@ function codegen(cg::CodeGen, expr::Expr)
             R = codegen(cg, rhs)
             return LLVM.add!(cg.builder, L, R, "addtmp")
         elseif expr.args[1] == :-
-            xpr.args[1] == :+
             lhs = expr.args[2]
             rhs = expr.args[3]
             L = codegen(cg, lhs)
             R = codegen(cg, rhs)
             return LLVM.sub!(cg.builder, L, R, "subtmp")
+        elseif expr.args[1] == :*
+            lhs = expr.args[2]
+            rhs = expr.args[3]
+            L = codegen(cg, lhs)
+            R = codegen(cg, rhs)
+            return LLVM.mul!(cg.builder, L, R, "multmp")
+        elseif expr.args[1] == :/
+            lhs = expr.args[2]
+            rhs = expr.args[3]
+            L = codegen(cg, lhs)
+            R = codegen(cg, rhs)
+            return LLVM.div!(cg.builder, L, R, "divtmp")
+        else
+            error("unreachable path")
         end
     elseif expr.head == :function
         # prototype
@@ -67,10 +80,10 @@ function codegen(cg::CodeGen, expr::Expr)
             LLVM.name!(param, signature.args[i])
         end
 
+        # body
         entry = LLVM.BasicBlock(func, "entry")
         LLVM.position!(cg.builder, entry)
 
-        # body
         new_scope(cg) do
             for (i, param) in enumerate(LLVM.parameters(func))
                 argname = signature.args[i]
