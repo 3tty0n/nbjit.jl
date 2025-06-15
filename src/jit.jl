@@ -29,6 +29,12 @@ function codegen(cg::CodeGen, expr::Int64)
     return LLVM.ConstantInt(LLVM.IntType(64), eval(expr))
 end
 
+function codegen(cg::CodeGen, expr::Symbol)
+    V = get(current_scope(cg), string(expr), nothing)
+    V == nothing && error("did not find variable $(expr.name)")
+    return LLVM.load!(cg.builder, LLVM.IntType(64), V, string(expr))
+end
+
 function codegen(cg::CodeGen, expr::Expr)
     if expr.head == :(=) && isa(expr.args[1], Symbol)
         local initval
@@ -152,4 +158,4 @@ function run(code::String, entry::String)
     return res_jl
 end
 
-run("function entry() 1+2 end", "entry")
+run("function entry() x=1; return x+2 end", "entry")
