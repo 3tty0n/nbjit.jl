@@ -140,8 +140,7 @@ function create_entry_block_allocation(cg::CodeGen, fn::LLVM.Function, varname::
     return alloc
 end
 
-function generate_IR(code)
-    ctx = LLVM.Context()
+function generate_IR(ctx::LLVM.Context, code)
     cg = CodeGen()
     expr = Meta.parse(code)
     codegen(cg, expr)
@@ -152,16 +151,29 @@ end
 
 function run(code::String, entry::String)
     local res_jl
-    @show m = generate_IR(code)
-    LLVM.@dispose engine=LLVM.JIT(m) begin
-        f = LLVM.functions(engine)[entry]
-        res = LLVM.run(engine, f)
-        res_jl = convert(Int64, res)
-        LLVM.dispose(res)
+    LLVM.Context() do ctx
+        mod = generate_IR(ctx, code)
+        LLVM.@dispose engine = LLVM.JIT(mod) begin
+            if !haskey(LLVM.functions(engine), entry)
+                error("did not find entry function '$entry' in module")
+            end
+            f = LLVM.functions(engine)[entry]
+            res = LLVM.run(engine, f)
+            res_jl = convert(Int64, res)
+            LLVM.dispose(res)
+        end
     end
 
     println(res_jl)
     return res_jl
+end
+
+function write_objectfile(mod::LLVM.Module, path::String)
+    host_triple = Sys.MACHINE # LLVM.triple() might be wrong (see LLVM.jl#108)
+    host_t = LLVM.Target(triple=host_triple)
+    LLVM.@dispose tm=LLVM.TargetMachine(host_t, host_triple) begin
+        LLVM.emit(tm, mod, LLVM.API.LLVMObjectFile, path)
+    end
 end
 
 run("function entry() x=1; y=x+1; return y+2 end", "entry")
