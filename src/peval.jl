@@ -1,3 +1,5 @@
+using LLVM
+
 tbl_func = Dict{Symbol, Expr}()
 
 const id_ref = Ref(-1)
@@ -106,33 +108,23 @@ end
 
 function collect_variables(expr, const_map)
     vars = Set{Symbol}()
-    known_locals = Set{Symbol}() # Variables defined within the function body (e.g., via x = ...)
+    known_locals = Set{Symbol}()
 
     function traverse(e)
         if e isa Expr
             if e.head == :call
-                # e.args[1] is the function name, IGNORE IT.
-                # Recursively traverse only the function's
-                # arguments (args[2] onwards).
                 for arg in e.args[2:end]
                     traverse(arg)
                 end
-
-            # Track variables defined in assignments
             elseif e.head == :(=) && e.args[1] isa Symbol
                 push!(known_locals, e.args[1])
-                # Only traverse the right-hand side for variables
                 traverse(e.args[2])
             else
-                # For any other expression type
-                # (:if, :block, etc.), traverse all children
                 for arg in e.args
                     traverse(arg)
                 end
             end
         elseif e isa Symbol
-            # A symbol is a dynamic variable if it's not a known constant,
-            # not defined locally, and not a built-in function (like `>`).
             if !haskey(const_map, e) && !(e in known_locals) && !isdefined(Base, e) && !isdefined(Core, e)
                 push!(vars, e)
             end
@@ -141,6 +133,49 @@ function collect_variables(expr, const_map)
 
     traverse(expr)
     return vars
+end
+
+function collect_variables_with_types(expr, const_map)
+    vars_with_types = Dict{Symbol, DataType}()
+    known_locals = Set{Symbol}()
+
+    function traverse(e)
+        if e isa Expr
+            if e.head == :function
+                call_sig = e.args[1]
+                for arg_expr in call_sig.args[2:end]
+                    arg_name = (arg_expr isa Symbol) ? arg_expr : arg_expr.args[1]
+                    push!(known_locals, arg_name)
+                end
+                traverse(e.args[2])
+
+            elseif e.head == :call
+                for arg in e.args[2:end]
+                    traverse(arg)
+                end
+
+            elseif e.head == :(=) && e.args[1] isa Symbol
+                push!(known_locals, e.args[1])
+                traverse(e.args[2])
+
+            else
+                for arg in e.args
+                    traverse(arg)
+                end
+            end
+        elseif e isa Symbol
+            if !haskey(const_map, e) && !(e in known_locals) &&
+                !isdefined(Base, e) && !isdefined(Core, e)
+
+                # Try to infer type from const_map or fallback to Any
+                typ = haskey(const_map, e) ? typeof(const_map[e]) : Any
+                vars_with_types[e] = typ
+            end
+        end
+    end
+
+    traverse(expr)
+    return vars_with_types
 end
 
 function create_entry(code, const_map)
@@ -155,5 +190,6 @@ function create_entry(code, const_map)
     # TODO: inesrt guards by the types of
     # un-folded (dynamic = edited) variables
     tbl_func[fname] = func_expr
+    @show func_expr
     return func_expr
 end
