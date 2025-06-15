@@ -69,7 +69,7 @@ function codegen(cg::CodeGen, expr::Expr)
             rhs = expr.args[3]
             L = codegen(cg, lhs)
             R = codegen(cg, rhs)
-            return LLVM.div!(cg.builder, L, R, "divtmp")
+            return LLVM.udiv!(cg.builder, L, R, "udivtmp")
         else
             error("unreachable path")
         end
