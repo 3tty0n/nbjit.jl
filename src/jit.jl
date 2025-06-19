@@ -76,8 +76,20 @@ function codegen(cg::CodeGen, expr::Expr)
             L = codegen(cg, lhs)
             R = codegen(cg, rhs)
             return LLVM.udiv!(cg.builder, L, R, "udivtmp")
+        elseif expr.args[1] == :<
+            lhs = expr.args[2]
+            rhs = expr.args[3]
+            L = codegen(cg, lhs)
+            R = codegen(cg, rhs)
+            return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntULT, L, R, "cmptmp")
+        elseif expr.args[1] == :>
+            lhs = expr.args[2]
+            rhs = expr.args[3]
+            L = codegen(cg, lhs)
+            R = codegen(cg, rhs)
+            return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntUGT, L, R, "cmptmp")
         else
-            error("unreachable path")
+            error("unreachable path", expr)
         end
     elseif expr.head == :function
         # prototype
@@ -96,6 +108,7 @@ function codegen(cg::CodeGen, expr::Expr)
         entry = LLVM.BasicBlock(func, "entry")
         LLVM.position!(cg.builder, entry)
 
+        local alloc
         new_scope(cg) do
             for (i, param) in enumerate(LLVM.parameters(func))
                 argname = signature.args[i]
@@ -103,12 +116,51 @@ function codegen(cg::CodeGen, expr::Expr)
                 LLVM.store!(cg.builder, param, alloc)
                 current_scope(cg)[argname] = alloc
             end
-
-            codegen(cg, expr.args[2])
-            #LLVM.ret!(cg.builder, body)
+            body = codegen(cg, expr.args[2])
+            LLVM.ret!(cg.builder, body)
             LLVM.verify(func)
         end
         return func
+    elseif expr.head == :return
+        rhs = expr.args[1]
+        retval = codegen(cg, rhs)
+        # Caution: should not add terminator here
+        return retval
+    elseif expr.head == :if
+	    func = LLVM.parent(LLVM.position(cg.builder))
+        then = LLVM.BasicBlock(func, "then")
+        elsee = LLVM.BasicBlock(func, "else")
+        merge = LLVM.BasicBlock(func, "ifcont")
+
+        local phi
+        new_scope(cg) do
+            # if
+            cond_exp = expr.args[1]
+            cond = codegen(cg, cond_exp)
+            zero = LLVM.ConstantInt(LLVM.Int64Type(), 0)
+            condv = LLVM.icmp!(cg.builder, LLVM.API.LLVMIntEQ, cond, zero, "ifcond")
+            LLVM.br!(cg.builder, condv, then, elsee)
+
+            # then
+            then_exp = expr.args[2]
+            LLVM.position!(cg.builder, then)
+            thencg = codegen(cg, then_exp)
+            LLVM.br!(cg.builder, merge)
+            then_block = position(cg.builder)
+
+            # else
+            else_exp = expr.args[3]
+            LLVM.position!(cg.builder, elsee)
+            elsecg = codegen(cg, else_exp)
+            LLVM.br!(cg.builder, merge)
+            else_block = position(cg.builder)
+
+            # merge
+            LLVM.position!(cg.builder, merge)
+            phi = LLVM.phi!(cg.builder, LLVM.Int64Type(), "iftmp")
+            append!(LLVM.incoming(phi), [(thencg, then_block), (elsecg, else_block)])
+        end
+        return phi
     elseif expr.head == :block
         local result
         for expr in expr.args
@@ -118,11 +170,6 @@ function codegen(cg::CodeGen, expr::Expr)
             result = codegen(cg, expr)
         end
         return result
-    elseif expr.head == :return
-        rhs = expr.args[1]
-        retval = codegen(cg, rhs)
-        LLVM.ret!(cg.builder, retval)
-        return retval
     end
 end
 
@@ -140,9 +187,21 @@ function create_entry_block_allocation(cg::CodeGen, fn::LLVM.Function, varname::
     return alloc
 end
 
-function generate_IR(ctx::LLVM.Context, code)
+function generate_IR(ctx::LLVM.Context, code::String)
     cg = CodeGen()
     expr = Meta.parse(code)
+    if expr.head == :incomplete
+        error(expr.args[1])
+    end
+
+    codegen(cg, expr)
+    LLVM.verify(cg.mod)
+    LLVM.dispose(cg.builder)
+    return cg.mod
+end
+
+function generate_IR(ctx::LLVM.Context, expr::Expr)
+    cg = CodeGen()
     codegen(cg, expr)
     LLVM.verify(cg.mod)
     LLVM.dispose(cg.builder)
@@ -150,6 +209,25 @@ function generate_IR(ctx::LLVM.Context, code)
 end
 
 function run(code::String, entry::String)
+    local res_jl
+    LLVM.Context() do ctx
+        mod = generate_IR(ctx, code)
+        LLVM.@dispose engine = LLVM.JIT(mod) begin
+            if !haskey(LLVM.functions(engine), entry)
+                error("did not find entry function '$entry' in module")
+            end
+            f = LLVM.functions(engine)[entry]
+            res = LLVM.run(engine, f)
+            res_jl = convert(Int64, res)
+            LLVM.dispose(res)
+        end
+    end
+
+    println(res_jl)
+    return res_jl
+end
+
+function run(code::Expr, entry::String)
     local res_jl
     LLVM.Context() do ctx
         mod = generate_IR(ctx, code)
@@ -176,4 +254,17 @@ function write_objectfile(mod::LLVM.Module, path::String)
     end
 end
 
-run("function entry() x=1; y=x+1; return y+2 end", "entry")
+run(:(function entry()
+          x = 1
+          y = x + 1
+          return y + 2
+      end), "entry")
+
+
+run(:(function entry()
+          if 10 > 2
+              return 1
+          else
+              return 2
+          end
+      end), "entry")
