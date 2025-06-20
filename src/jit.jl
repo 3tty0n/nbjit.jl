@@ -137,8 +137,8 @@ function codegen(cg::CodeGen, expr::Expr)
             # if
             cond_exp = expr.args[1]
             cond = codegen(cg, cond_exp)
-            zero = LLVM.ConstantInt(LLVM.Int64Type(), 0)
-            condv = LLVM.icmp!(cg.builder, LLVM.API.LLVMIntEQ, cond, zero, "ifcond")
+            zero = LLVM.ConstantInt(LLVM.Int1Type(), 0)
+            condv = LLVM.icmp!(cg.builder, LLVM.API.LLVMIntNE, cond, zero, "ifcond")
             LLVM.br!(cg.builder, condv, then, elsee)
 
             # then
@@ -262,7 +262,8 @@ run(:(function entry()
 
 
 run(:(function entry()
-          if 10 > 2
+          x = 1
+          if x > 2
               return 1
           else
               return 2
