@@ -100,9 +100,14 @@ function partial_evaluate(expr, const_map)
     end
 end
 
-function simplify_function(code, const_map)
+function simplify_function(code::String, const_map)
     ast = Meta.parse(code)
     folded_ast = partial_evaluate(ast, const_map)
+    return folded_ast
+end
+
+function simplify_function(code::Expr, const_map)
+    folded_ast = partial_evaluate(code, const_map)
     return folded_ast
 end
 

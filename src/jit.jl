@@ -223,7 +223,7 @@ function run(code::String, entry::String)
         end
     end
 
-    println(res_jl)
+    #println(res_jl)
     return res_jl
 end
 
@@ -242,7 +242,7 @@ function run(code::Expr, entry::String)
         end
     end
 
-    println(res_jl)
+    #println(res_jl)
     return res_jl
 end
 
@@ -253,19 +253,3 @@ function write_objectfile(mod::LLVM.Module, path::String)
         LLVM.emit(tm, mod, LLVM.API.LLVMObjectFile, path)
     end
 end
-
-run(:(function entry()
-          x = 1
-          y = x + 1
-          return y + 2
-      end), "entry")
-
-
-run(:(function entry()
-          x = 1
-          if x > 2
-              return 1
-          else
-              return 2
-          end
-      end), "entry")
