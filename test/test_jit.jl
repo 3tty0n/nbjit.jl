@@ -68,12 +68,10 @@ function test2()
     end
     env = create_env_from_mapping(N)
     env[:x] = :(1)
-    func = create_entry(code2, env)
-    println("\nCreated function entry:")
-    println(func)
+    fname = create_entry(code2, env)
 
-    f = eval(func)
-    return Base.invokelatest(f, 12) == 23
+    func = lookup_function(fname)
+    return Base.invokelatest(func, 120) == 131
 end
 
 @test test2()

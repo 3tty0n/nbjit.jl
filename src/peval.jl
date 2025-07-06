@@ -1,6 +1,6 @@
 using LLVM
 
-tbl_func = Dict{Symbol, Expr}()
+tbl_func = Dict{Symbol, Any}()
 
 const id_ref = Ref(-1)
 
@@ -184,8 +184,8 @@ function collect_variables_with_types(expr, const_map)
 end
 
 function create_entry(code, const_map)
-    @show folded_ast = simplify_function(code, const_map)
-    @show unfolded_vars = collect_variables(folded_ast, const_map)
+    folded_ast = simplify_function(code, const_map)
+    unfolded_vars = collect_variables(folded_ast, const_map)
     fname = Symbol(gen_func_id())
     func_expr = quote
         function $(fname)($(unfolded_vars...))
@@ -194,7 +194,14 @@ function create_entry(code, const_map)
     end
     # TODO: inesrt guards by the types of
     # un-folded (dynamic = edited) variables
-    tbl_func[fname] = func_expr
-    @show func_expr
-    return func_expr
+    tbl_func[fname] = eval(func_expr)
+    return fname
+end
+
+function lookup_function(fname)
+    if haskey(tbl_func, fname)
+        return tbl_func[fname]
+    else
+        throw("$fname is not found in tbl_func")
+    end
 end
