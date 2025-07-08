@@ -209,45 +209,6 @@ function generate_IR(ctx::LLVM.Context, expr::Expr)
     return cg.mod
 end
 
-function compile(code::Expr)
-    @show code
-    ctx = LLVM.Context()
-    return generate_IR(ctx, code)
-end
-
-function lookup(entry::String)
-    local f
-    LLVM.Context() do ctx
-        LLVM.@dispose engine = LLVM.JIT(mod) begin
-            if !haskey(LLVM.functions(engine), entry)
-                error("did not find entry function '$entry' in module")
-            end
-            f = LLVM.functions(engine)[entry]
-            LLVM.dispose(engine)
-        end
-    end
-    return f
-end
-
-function compile_and_run(code::String, entry::String)
-    local res_jl
-    LLVM.Context() do ctx
-        mod = generate_IR(ctx, code)
-        LLVM.@dispose engine = LLVM.JIT(mod) begin
-            if !haskey(LLVM.functions(engine), entry)
-                error("did not find entry function '$entry' in module")
-            end
-            f = LLVM.functions(engine)[entry]
-            res = LLVM.run(engine, f)
-            res_jl = convert(Int64, res)
-            LLVM.dispose(res)
-        end
-    end
-
-    #println(res_jl)
-    return res_jl
-end
-
 function compile_and_run(code::Expr, entry::String)
     local res_jl
     LLVM.Context() do ctx
