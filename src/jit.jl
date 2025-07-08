@@ -233,3 +233,17 @@ function write_objectfile(mod::LLVM.Module, path::String)
         LLVM.emit(tm, mod, LLVM.API.LLVMObjectFile, path)
     end
 end
+
+function optimize!(mod::LLVM.Module)
+    host_triple = Sys.MACHINE # LLVM.triple() might be wrong (see LLVM.jl#108)
+    host_t = LLVM.Target(triple=host_triple)
+    LLVM.@dispose tm=LLVM.TargetMachine(host_t, host_triple) pb=LLVM.NewPMPassBuilder() begin
+        LLVM.add!(pb, LLVM.InstCombinePass())
+        LLVM.add!(pb, LLVM.ReassociatePass())
+        LLVM.add!(pb, LLVM.GVNPass())
+        LLVM.add!(pb, LLVM.SimplifyCFGPass())
+        LLVM.add!(pb, LLVM.PromotePass())
+        LLVM.run!(pb, mod, tm)
+    end
+    return mod
+end
