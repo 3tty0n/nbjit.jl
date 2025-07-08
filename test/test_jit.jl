@@ -26,7 +26,8 @@ end
 
 function test_jit_with_gumtree()
     code1 = :(
-        function f(x, y)
+        function cell1_0(y)
+            x = 123
             if x <= 1
                 x = x + 2
             end
@@ -34,9 +35,10 @@ function test_jit_with_gumtree()
         end)
 
     code2 = :(
-        function f(x, y)
+        function cell1_1(x, y)
+            x = 435
             if x <= 1
-                x = x + 10
+                x = x + 2
             end
             return x + y
         end)
@@ -54,10 +56,11 @@ function test_jit_with_gumtree()
         push!(N, (expr1, expr2))
     end
     env = create_env_from_mapping(N)
-    env[:x] = :(1)
-    func_expr, fname = create_entry(code2, env)
-    res = compile_and_run(func_expr, string(fname), 123)
-    return res == 134
+    env[:x] = :(435)
+    func_expr, fname = simply_and_make_entry(code2, env)
+    @show func_expr
+    @show res = compile_and_run(func_expr, string(fname), 123)
+    return res == 558
 
 end
 
