@@ -35,11 +35,12 @@ function test_jit_with_gumtree()
         end)
 
     code2 = :(
-        function cell1_1(x, y)
-            x = 435
+        function cell1_1(y)
+            x = 123
             if x <= 1
                 x = x + 2
             end
+            y = y * 2
             return x + y
         end)
 
@@ -55,13 +56,14 @@ function test_jit_with_gumtree()
         expr2 = treenode_to_expr(t2)
         push!(N, (expr1, expr2))
     end
-    env = create_env_from_mapping(N)
-    env[:x] = :(435)
+    # TODO: Precise extract variables that have been designated as "edited."
+    @show N
+    @show env = create_env_from_mapping(N)
+    env[:x] = :(123)
     func_expr, fname = simply_and_make_entry(code2, env)
     @show func_expr
     @show res = compile_and_run(func_expr, string(fname), 123)
-    return res == 558
-
+    return res == 369
 end
 
 @test test_jit_with_gumtree()
