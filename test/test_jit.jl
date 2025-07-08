@@ -55,10 +55,9 @@ function test_jit_with_gumtree()
     end
     env = create_env_from_mapping(N)
     env[:x] = :(1)
-    fname = create_entry(code2, env)
-    func_expr = lookup_function(fname)
-    mod = compile(func_expr)
-    return true
+    func_expr, fname = create_entry(code2, env)
+    res = compile_and_run(func_expr, string(fname), 123)
+    return res == 134
 
 end
 
