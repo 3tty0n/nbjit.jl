@@ -30,6 +30,10 @@ function codegen(cg::CodeGen, expr::Int64)
 end
 
 function codegen(cg::CodeGen, expr::Symbol)
+    if expr == :nothing
+        return
+    end
+
     V = get(current_scope(cg), string(expr), nothing)
     V == nothing && error("did not find variable $(expr)")
     return LLVM.load!(cg.builder, LLVM.Int64Type(), V, string(expr))
