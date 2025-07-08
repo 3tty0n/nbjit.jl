@@ -209,7 +209,7 @@ function generate_IR(ctx::LLVM.Context, expr::Expr)
     return cg.mod
 end
 
-function compile_and_run(code::Expr, entry::String)
+function compile_and_run(code::Expr, entry::String, arg::Int64)
     local res_jl
     LLVM.Context() do ctx
         mod = generate_IR(ctx, code)
@@ -217,14 +217,12 @@ function compile_and_run(code::Expr, entry::String)
             if !haskey(LLVM.functions(engine), entry)
                 error("did not find entry function '$entry' in module")
             end
-            f = LLVM.functions(engine)[entry]
-            res = LLVM.run(engine, f)
+            f = lookup(engine, entry)
+            res = ccall(f, Int64, (Int64,), arg)
             res_jl = convert(Int64, res)
-            LLVM.dispose(res)
         end
     end
 
-    #println(res_jl)
     return res_jl
 end
 
