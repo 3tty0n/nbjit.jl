@@ -43,7 +43,7 @@ function partial_evaluate(expr, const_map, const_map_stack=[])
             var = expr.args[1]
             value = propagate_constants(expr.args[2], const_map)
 
-            if can_fold(value)
+            if can_fold(value) || haskey(const_map, var)
                 value = eval(value)
                 const_map[var] = value
             end
@@ -54,20 +54,21 @@ function partial_evaluate(expr, const_map, const_map_stack=[])
             if length(expr.args) == 2
                 if can_fold(condition)
                     if eval(condition)
-                        then_block = partial_evaluate(expr.args[2], new_const_map)
+                        then_block = partial_evaluate(expr.args[2], const_map)
                         return then_block
                     else
                         return :nothing
                     end
                 end
+                then_block = partial_evaluate(expr.args[2], const_map)
                 return Expr(:if, condition, then_block)
             else
                 if can_fold(condition)
                     if eval(condition)
-                        then_block = partial_evaluate(expr.args[2], new_const_map)
+                        then_block = partial_evaluate(expr.args[2], const_map)
                         return then_block
                     else
-                        else_block = partial_evaluate(expr.args[3], new_const_map)
+                        else_block = partial_evaluate(expr.args[3], const_map)
                         return else_block
                     end
                 end
@@ -79,8 +80,7 @@ function partial_evaluate(expr, const_map, const_map_stack=[])
             fname = expr.args[1]
             body = expr.args[2]
             # Create a fresh map for each function scope
-            new_const_map = copy(const_map)
-            new_body = partial_evaluate(body, new_const_map)
+            new_body = partial_evaluate(body, const_map)
             return Expr(:function, fname, new_body)
 
         elseif expr.head == :call
