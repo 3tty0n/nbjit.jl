@@ -31,7 +31,7 @@ end
 
 function codegen(cg::CodeGen, expr::Symbol)
     V = get(current_scope(cg), string(expr), nothing)
-    V == nothing && error("did not find variable $(expr.name)")
+    V == nothing && error("did not find variable $(expr)")
     return LLVM.load!(cg.builder, LLVM.Int64Type(), V, string(expr))
 end
 
@@ -101,7 +101,8 @@ function codegen(cg::CodeGen, expr::Expr)
         LLVM.linkage!(func, LLVM.API.LLVMExternalLinkage)
 
         for (i, param) in enumerate(LLVM.parameters(func))
-            LLVM.name!(param, signature.args[i])
+            arg = string(signature.args[i+1])
+            LLVM.name!(param, arg)
         end
 
         # body
@@ -111,8 +112,8 @@ function codegen(cg::CodeGen, expr::Expr)
         local alloc
         new_scope(cg) do
             for (i, param) in enumerate(LLVM.parameters(func))
-                argname = signature.args[i]
-                create_entry_block_allocation(cg, func, argname)
+                argname = string(signature.args[i+1])
+                alloc = create_entry_block_allocation(cg, func, argname)
                 LLVM.store!(cg.builder, param, alloc)
                 current_scope(cg)[argname] = alloc
             end
@@ -208,7 +209,27 @@ function generate_IR(ctx::LLVM.Context, expr::Expr)
     return cg.mod
 end
 
-function run(code::String, entry::String)
+function compile(code::Expr)
+    @show code
+    ctx = LLVM.Context()
+    return generate_IR(ctx, code)
+end
+
+function lookup(entry::String)
+    local f
+    LLVM.Context() do ctx
+        LLVM.@dispose engine = LLVM.JIT(mod) begin
+            if !haskey(LLVM.functions(engine), entry)
+                error("did not find entry function '$entry' in module")
+            end
+            f = LLVM.functions(engine)[entry]
+            LLVM.dispose(engine)
+        end
+    end
+    return f
+end
+
+function compile_and_run(code::String, entry::String)
     local res_jl
     LLVM.Context() do ctx
         mod = generate_IR(ctx, code)
@@ -227,7 +248,7 @@ function run(code::String, entry::String)
     return res_jl
 end
 
-function run(code::Expr, entry::String)
+function compile_and_run(code::Expr, entry::String)
     local res_jl
     LLVM.Context() do ctx
         mod = generate_IR(ctx, code)

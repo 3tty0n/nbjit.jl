@@ -194,7 +194,7 @@ function create_entry(code, const_map)
     end
     # TODO: inesrt guards by the types of
     # un-folded (dynamic = edited) variables
-    tbl_func[fname] = eval(func_expr)
+    tbl_func[fname] = func_expr
     return fname
 end
 
