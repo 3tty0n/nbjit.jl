@@ -25,13 +25,17 @@ function propagate_constants(expr, const_map)
 end
 
 function can_fold(expr)
-    return (expr.head == :call &&
-        expr.args[1] in [:+, :-, :*, :/, :<, :>, :<=, :>=] &&
-        is_constant(expr.args[2]) &&
-        is_constant(expr.args[3]))
+    if hasproperty(expr, :head)
+        return (expr.head == :call &&
+            expr.args[1] in [:+, :-, :*, :/, :<, :>, :<=, :>=] &&
+            is_constant(expr.args[2]) &&
+            is_constant(expr.args[3]))
+    else
+        return false
+    end
 end
 
-function partial_evaluate(expr, const_map)
+function partial_evaluate(expr, const_map, const_map_stack=[])
     if is_constant(expr)
         return expr
     elseif isa(expr, Expr)
@@ -47,10 +51,10 @@ function partial_evaluate(expr, const_map)
 
         elseif expr.head == :if
             condition = propagate_constants(expr.args[1], const_map)
-            then_block = partial_evaluate(expr.args[2], const_map)
             if length(expr.args) == 2
                 if can_fold(condition)
                     if eval(condition)
+                        then_block = partial_evaluate(expr.args[2], new_const_map)
                         return then_block
                     else
                         return :nothing
@@ -58,11 +62,12 @@ function partial_evaluate(expr, const_map)
                 end
                 return Expr(:if, condition, then_block)
             else
-                else_block = partial_evaluate(expr.args[3], const_map)
                 if can_fold(condition)
                     if eval(condition)
+                        then_block = partial_evaluate(expr.args[2], new_const_map)
                         return then_block
                     else
+                        else_block = partial_evaluate(expr.args[3], new_const_map)
                         return else_block
                     end
                 end
@@ -74,7 +79,8 @@ function partial_evaluate(expr, const_map)
             fname = expr.args[1]
             body = expr.args[2]
             # Create a fresh map for each function scope
-            new_body = partial_evaluate(body, const_map)
+            new_const_map = copy(const_map)
+            new_body = partial_evaluate(body, new_const_map)
             return Expr(:function, fname, new_body)
 
         elseif expr.head == :call
@@ -183,7 +189,7 @@ function collect_variables_with_types(expr, const_map)
     return vars_with_types
 end
 
-function create_entry(code, const_map)
+function simply_and_make_entry(code, const_map)
     folded_ast = simplify_function(code, const_map)
     unfolded_vars = collect_variables(folded_ast, const_map)
     fname = Symbol(gen_func_id())
