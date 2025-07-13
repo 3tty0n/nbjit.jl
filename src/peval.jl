@@ -2,6 +2,14 @@ using LLVM
 
 tbl_func = Dict{Symbol, Any}()
 
+function lookup_function(fname)
+    if haskey(tbl_func, fname)
+        return tbl_func[fname]
+    else
+        throw("$fname is not found in tbl_func")
+    end
+end
+
 const id_ref = Ref(-1)
 
 function gen_func_id()
@@ -39,7 +47,16 @@ function partial_evaluate(expr, const_map, const_map_stack=[])
     if is_constant(expr)
         return expr
     elseif isa(expr, Expr)
-        if expr.head == :(=) && isa(expr.args[1], Symbol)
+        if expr.head == :macrocall
+            args = expr.args
+            annot = args[1]
+            expr = args[3]
+            if annot isa Symbol && string(annot) == "@constant"
+                var = expr.args[1]
+                val = expr.args[2]
+                const_map[var] = val
+            end
+        elseif expr.head == :(=) && isa(expr.args[1], Symbol)
             var = expr.args[1]
             value = propagate_constants(expr.args[2], const_map)
 
@@ -202,12 +219,4 @@ function simply_and_make_entry(code, const_map)
     # un-folded (dynamic = edited) variables
     tbl_func[fname] = func_expr
     return func_expr, fname
-end
-
-function lookup_function(fname)
-    if haskey(tbl_func, fname)
-        return tbl_func[fname]
-    else
-        throw("$fname is not found in tbl_func")
-    end
 end
