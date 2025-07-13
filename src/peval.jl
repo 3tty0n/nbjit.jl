@@ -1,5 +1,3 @@
-using LLVM
-
 tbl_func = Dict{Symbol, Any}()
 
 function lookup_function(fname)
@@ -21,11 +19,18 @@ function is_constant(expr)
     return expr isa Number || expr == :(true) || expr == :(false)
 end
 
-function propagate_constants(expr, const_map)
-    if isa(expr, Symbol) && haskey(const_map, expr)
-        return const_map[expr]  # Replace symbol with its constant value
+function propagate_constants(expr, const_map, unfolded_vars)
+    if isa(expr, Symbol)
+        if haskey(const_map, expr)
+            return const_map[expr]  # Replace symbol with its constant value
+        else
+            if !(expr in unfolded_vars) && !(expr in [:+, :-, :/, :*, :<, :>, :<=, :>=])
+                push!(unfolded_vars, expr)
+            end
+            return expr
+        end
     elseif isa(expr, Expr)
-        new_args = [propagate_constants(arg, const_map) for arg in expr.args]
+        new_args = [propagate_constants(arg, const_map, unfolded_vars) for arg in expr.args]
         return Expr(expr.head, new_args...)
     else
         return expr
@@ -43,7 +48,7 @@ function can_fold(expr)
     end
 end
 
-function partial_evaluate(expr, const_map, const_map_stack=[])
+function partial_evaluate(expr, const_map, unfolded_vars=[], const_map_stack=[])
     if is_constant(expr)
         return expr
     elseif isa(expr, Expr)
@@ -51,44 +56,51 @@ function partial_evaluate(expr, const_map, const_map_stack=[])
             args = expr.args
             annot = args[1]
             expr = args[3]
+
+            var = expr.args[1]
+            val = expr.args[2]
             if annot isa Symbol && string(annot) == "@constant"
-                var = expr.args[1]
-                val = expr.args[2]
                 const_map[var] = val
             end
+            return Expr(:(=), var, val)
         elseif expr.head == :(=) && isa(expr.args[1], Symbol)
             var = expr.args[1]
-            value = propagate_constants(expr.args[2], const_map)
+            if !haskey(const_map, var) && !(var in unfolded_vars) && !(var in [:+, :-, :/, :*, :<, :>, :<=, :>=])
+                push!(unfolded_vars, var)
+            end
 
-            if can_fold(value) || haskey(const_map, var)
+            value = propagate_constants(expr.args[2], const_map, unfolded_vars)
+            if can_fold(value)
                 value = eval(value)
                 const_map[var] = value
             end
             return Expr(:(=), var, value)
 
         elseif expr.head == :if
-            condition = propagate_constants(expr.args[1], const_map)
+            condition = propagate_constants(expr.args[1], const_map, unfolded_vars)
             if length(expr.args) == 2
                 if can_fold(condition)
                     if eval(condition)
-                        then_block = partial_evaluate(expr.args[2], const_map)
+                        then_block = partial_evaluate(expr.args[2], const_map, unfolded_vars)
                         return then_block
                     else
                         return :nothing
                     end
                 end
-                then_block = partial_evaluate(expr.args[2], const_map)
+                then_block = partial_evaluate(expr.args[2], const_map, unfolded_vars)
                 return Expr(:if, condition, then_block)
             else
                 if can_fold(condition)
                     if eval(condition)
-                        then_block = partial_evaluate(expr.args[2], const_map)
+                        then_block = partial_evaluate(expr.args[2], const_map, unfolded_vars)
                         return then_block
                     else
-                        else_block = partial_evaluate(expr.args[3], const_map)
+                        else_block = partial_evaluate(expr.args[3], const_map, unfolded_vars)
                         return else_block
                     end
                 end
+                then_block = partial_evaluate(expr.args[2], const_map, unfolded_vars)
+                else_block = partial_evaluate(expr.args[3], const_map, unfolded_vars)
                 return Expr(:if, condition, then_block, else_block)
             end
 
@@ -97,12 +109,12 @@ function partial_evaluate(expr, const_map, const_map_stack=[])
             fname = expr.args[1]
             body = expr.args[2]
             # Create a fresh map for each function scope
-            new_body = partial_evaluate(body, const_map)
+            new_body = partial_evaluate(body, const_map, unfolded_vars)
             return Expr(:function, fname, new_body)
 
         elseif expr.head == :call
             # Try to fold constants
-            folded_args = [propagate_constants(arg, const_map) for arg in expr.args]
+            folded_args = [propagate_constants(arg, const_map, unfolded_vars) for arg in expr.args]
             # Attempt to evaluate if all arguments are constants
             if all(is_constant, folded_args[2:end]) && folded_args[1] in [:+, :-, :*, :/]
                 try
@@ -115,7 +127,7 @@ function partial_evaluate(expr, const_map, const_map_stack=[])
             return Expr(:call, folded_args...)
         else
             # Recursively evaluate other expressions
-            new_args = [partial_evaluate(arg, const_map) for arg in expr.args]
+            new_args = [partial_evaluate(arg, const_map, unfolded_vars) for arg in expr.args]
             return Expr(expr.head, new_args...)
         end
     else

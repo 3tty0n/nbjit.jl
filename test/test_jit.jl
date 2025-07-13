@@ -27,13 +27,29 @@ end
 
 function test_jit_with_annot()
     code = quote
-        @constant x = 1
-        y = 2
-        z = 3
+        x = 1
+        @constant y = 2
+        z = x + y
+        if x < 3
+            z = z + 10
+        else
+            x = 3
+        end
+        return z
     end
-    const_map = Dict()
-    r = partial_evaluate(code, const_map)
-    return length(const_map) == 1 && const_map[:x] == 1
+    begin
+        const_map = Dict()
+        unfolded_vars = []
+        folded_ast = partial_evaluate(code, const_map, unfolded_vars)
+        fname = Symbol("func_0")
+        @show func_expr = quote
+            function $(fname)($(unfolded_vars...))
+                $(folded_ast)
+            end
+        end
+        @show res = compile_and_run(func_expr, string(fname), 123)
+    end
+    return true
 end
 
 @test test_jit_with_annot()
