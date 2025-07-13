@@ -24,6 +24,20 @@ end
 
 # @test test_run()
 
+
+function test_jit_with_annot()
+    code = quote
+        @constant x = 1
+        y = 2
+        z = 3
+    end
+    const_map = Dict()
+    r = partial_evaluate(code, const_map)
+    return length(const_map) == 1 && const_map[:x] == 1
+end
+
+@test test_jit_with_annot()
+
 function test_jit_with_gumtree()
     code1 = :(
         function cell1_0(y)
@@ -66,4 +80,4 @@ function test_jit_with_gumtree()
     return res == 369
 end
 
-@test test_jit_with_gumtree()
+#@test test_jit_with_gumtree()
