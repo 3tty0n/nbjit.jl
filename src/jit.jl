@@ -92,6 +92,25 @@ function codegen(cg::CodeGen, expr::Expr)
             L = codegen(cg, lhs)
             R = codegen(cg, rhs)
             return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntUGT, L, R, "cmptmp")
+        elseif expr.args[1] isa Symbol
+            callee = expr.args[1]
+            julia_args = expr.args[2:end]
+
+            if !haskey(LLVM.functions(cg.mod), expr.callee)
+                error("encountered undeclared function $(expr.callee)")
+            end
+            func =  LLVM.functions(cg.mod)[callee]
+
+            if length(LLVM.parameters(func)) != length(args)
+                error("number of parameters mismatch")
+            end
+
+            args = LLVM.Value[]
+            for v in julia_args
+                push!(args, codegen(cg, v))
+            end
+            ft = LLVM.function_type(func)
+            return LLVM.call!(cg.builder, ft, func, args, "calltmp")
         else
             error("unreachable path", expr)
         end
