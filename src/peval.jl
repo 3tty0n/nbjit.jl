@@ -218,6 +218,19 @@ function collect_variables_with_types(expr, const_map)
     return vars_with_types
 end
 
+function partial_evaluate_and_make_entry(code)
+    const_map = Dict()
+    unfolded_vars = []
+    folded_ast = partial_evaluate(code, const_map, unfolded_vars)
+    fname = Symbol("func_0")
+    func_expr = quote
+        function $(fname)($(unfolded_vars...))
+            $(folded_ast)
+        end
+    end
+    return func_expr, fname
+end
+
 function simply_and_make_entry(code, const_map)
     folded_ast = simplify_function(code, const_map)
     unfolded_vars = collect_variables(folded_ast, const_map)

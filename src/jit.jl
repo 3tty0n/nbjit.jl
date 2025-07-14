@@ -232,6 +232,7 @@ function generate_IR(ctx::LLVM.Context, expr::Expr)
     return cg.mod
 end
 
+# TODO: execute with arbinary number of arguments
 function compile_and_run(code::Expr, entry::String, arg::Int64)
     local res_jl
     LLVM.Context() do ctx
