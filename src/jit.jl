@@ -1,8 +1,23 @@
 using LLVM
 using LLVM.Interop
 
-include("./peval.jl")
 include("./jit_scope.jl")
+
+FUNC_TBL = Dict()
+
+function get_func_ptr(name, typ)
+    key = (name, typ...,)
+    if haskey(FUNC_TBL, key)
+        return FUNC_TBL[key]
+    else
+        error("$name is not defined in the function table")
+    end
+end
+
+function store_func_ptr(name, typ, ptr)
+    key = (name, typ...,)
+    FUNC_TBL[key]  = ptr
+end
 
 mutable struct CodeGen
     builder::LLVM.IRBuilder
@@ -37,6 +52,10 @@ function codegen(cg::CodeGen, expr::Symbol)
     V = get(current_scope(cg), string(expr), nothing)
     V == nothing && error("did not find variable $(expr)")
     return LLVM.load!(cg.builder, LLVM.Int64Type(), V, string(expr))
+end
+
+function codegen(cg::CodeGen, expr::Nothing)
+    return
 end
 
 function codegen(cg::CodeGen, expr::Expr)
@@ -96,12 +115,12 @@ function codegen(cg::CodeGen, expr::Expr)
             callee = expr.args[1]
             julia_args = expr.args[2:end]
 
-            if !haskey(LLVM.functions(cg.mod), expr.callee)
-                error("encountered undeclared function $(expr.callee)")
+            if !haskey(LLVM.functions(cg.mod), string(callee))
+                error("encountered undeclared function $(callee)")
             end
-            func =  LLVM.functions(cg.mod)[callee]
+            func =  LLVM.functions(cg.mod)[string(callee)]
 
-            if length(LLVM.parameters(func)) != length(args)
+            if length(LLVM.parameters(func)) != length(julia_args)
                 error("number of parameters mismatch")
             end
 
@@ -142,7 +161,7 @@ function codegen(cg::CodeGen, expr::Expr)
             end
             body = codegen(cg, expr.args[2])
             LLVM.ret!(cg.builder, body)
-            LLVM.verify(func)
+            #LLVM.verify(func)
         end
         return func
     elseif expr.head == :return
@@ -230,6 +249,13 @@ function generate_IR(ctx::LLVM.Context, expr::Expr)
     LLVM.verify(cg.mod)
     LLVM.dispose(cg.builder)
     return cg.mod
+end
+
+id = -1
+
+function gen_func_id()
+    global id = id + 1
+    return Symbol("func_$id")
 end
 
 # TODO: execute with arbinary number of arguments

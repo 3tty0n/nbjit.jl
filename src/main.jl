@@ -1,4 +1,4 @@
-include("./peval.jl")
+include("./partial_evaluate.jl")
 include("./jit.jl")
 
 function main(path)

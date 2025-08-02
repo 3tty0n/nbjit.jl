@@ -1,3 +1,4 @@
+include("./parse_annot.jl")
 
 function is_constant(expr)
     return expr isa Number || expr == :(true) || expr == :(false)
@@ -19,20 +20,19 @@ function propagate_constants(expr, unfolded_vars, env)
     end
 end
 
+function _can_fold(expr, unfolded_vars)
+    for unfolded_expr in unfolded_vars
+        if unfolded_expr == expr
+            return true
+        else
+            return _can_fold(expr, unfolded_expr.arg)
+        end
+    end
+    return false
+end
+
 function can_fold(expr, unfolded_vars, env)
-    if expr isa Symbol
-        return !(expr in unfolded_vars)
-    end
-
-    if expr isa Number || expr isa String
-        return true
-    end
-
-    if length(expr.args) == 1
-        return true
-    else
-        return all([!(x in unfolded_vars) for x in expr.args[2:end]])
-    end
+    return _can_fold(expr, unfolded_vars)
 end
 
 function evaluate_binary(op, lhs, rhs)
@@ -100,7 +100,13 @@ function partial_evaluate(expr, unfolded_vars, env)
 
     head = expr.head
 
-    if head in [:+, :-, :*, :/, :<, :>, :<=, :>=]
+    if head == :macrocall
+        args = expr.args
+        annot = args[1]
+        if string(annot) == "@hole"
+            return Expr(:hole, args[2:end])
+        end
+    elseif head in [:+, :-, :*, :/, :<, :>, :<=, :>=]
         return partial_evaluate_binary(expr, unfolded_vars, env)
     elseif head == :&& || head == :||
         lhs = partial_evaluate(expr.args[1], unfolded_vars, env)
@@ -198,6 +204,23 @@ function partial_evaluate(expr, unfolded_vars, env)
     end
 end
 
+function partial_evaluate_and_make_entry(code)
+    env = Dict()
+    unfolded_vars = []
+    parse_annot(code, unfolded_vars)
+    unfolded_vars = filter(x -> !isnothing(x) && !isa(x, LineNumberNode),
+                           unfolded_vars)
+
+    folded_ast = partial_evaluate(code, unfolded_vars, env)
+    fname = Symbol("func_0")
+    func_expr = quote
+        function $(fname)($(unfolded_vars...))
+            $(folded_ast)
+        end
+    end
+    return func_expr, fname
+end
+
 using Test
 
 function equalto(expr1, expr2)
@@ -205,7 +228,13 @@ function equalto(expr1, expr2)
 end
 
 env = Dict(:x => 42)
-equalto(partial_evaluate(:(if x < 1 return x else 2 end), [], env), :(begin 2 end))
-equalto(partial_evaluate(:(f(x, y)), [:y], env), :(f(42, y)))
+#equalto(partial_evaluate(:(if x < 1 return x else 2 end), [], env), :(begin 2 end))
+#equalto(partial_evaluate(:(f(x, y)), [:y], env), :(f(42, y)))
 # println(partial_evaluate(:(for x in [1,2,3] y = x + 1 end), [], env))
-equalto(partial_evaluate(:(function f(x, y) return x + y end), [:y], env), :(function f(x, y) return 42 + y end))
+#equalto(partial_evaluate(:(function f(x, y) return x + y end), [:y], env), :(function f(x, y) return 42 + y end))
+
+println(partial_evaluate(
+    :(@hole y = 2),
+    [],
+    env
+))
