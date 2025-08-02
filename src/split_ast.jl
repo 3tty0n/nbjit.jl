@@ -68,6 +68,10 @@ end
 
 convert_ast_with_hole(expr) = expr
 
+"""
+    convert the ast into the `holing' ast
+    it converts @hole annotated expr into Expr(:hole, ...)
+"""
 function convert_ast_with_hole(expr::Expr)
     if expr.head == :macrocall
         args = expr.args
@@ -103,6 +107,13 @@ function convert_ast_with_hole(expr::Expr)
     end
 end
 
+"""
+    split_at_hole(expr) -> expr, expr
+
+    Split ast at the place of a hole node
+    When splitting the ast, it estimates the guard symbols by
+    calculating free variables in `pre_args'.
+"""
 function split_at_hole(block::Expr)
     @assert block.head in (:block, :toplevel, :begin)
     # locate the hole
