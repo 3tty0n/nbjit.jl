@@ -25,7 +25,7 @@ function _can_fold(expr, unfolded_vars)
         if unfolded_expr == expr
             return true
         else
-            return _can_fold(expr, unfolded_expr.arg)
+            return _can_fold(unfolded_expr, unfolded_vars)
         end
     end
     return false
@@ -104,7 +104,9 @@ function partial_evaluate(expr, unfolded_vars, env)
         args = expr.args
         annot = args[1]
         if string(annot) == "@hole"
-            return Expr(:hole, args[2:end])
+            return
+        else
+            return expr
         end
     elseif head in [:+, :-, :*, :/, :<, :>, :<=, :>=]
         return partial_evaluate_binary(expr, unfolded_vars, env)
