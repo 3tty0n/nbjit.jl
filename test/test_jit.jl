@@ -4,27 +4,6 @@ include("../src/diff.jl")
 include("../src/peval.jl")
 include("../src/jit.jl")
 
-function test_run()
-    compile_and_run(:(function entry()
-            x = 1
-            y = x + 1
-            return y + 2
-        end), "entry") == 4
-
-
-    return compile_and_run(:(function entry()
-            x = 1
-            if x > 2
-                return 1
-            else
-                return 2
-            end
-        end), "entry") == 2
-end
-
-# @test test_run()
-
-
 function test_jit_with_annot()
     code = quote
         x = 1
@@ -38,21 +17,33 @@ function test_jit_with_annot()
         return z
     end
     begin
-        const_map = Dict()
-        unfolded_vars = []
-        folded_ast = partial_evaluate(code, const_map, unfolded_vars)
-        fname = Symbol("func_0")
-        @show func_expr = quote
-            function $(fname)($(unfolded_vars...))
-                $(folded_ast)
-            end
-        end
+        fname, func_expr = create_entry(code)
         @show res = compile_and_run(func_expr, string(fname), 123)
     end
     return true
 end
 
 @test test_jit_with_annot()
+
+function test_jit_with_annot_2()
+    code = quote
+        function f()
+            x = 1
+            return x
+        end
+
+        x = f()
+        return x
+    end
+
+    begin
+        fname, func_expr = create_entry(code)
+        @show res = compile_and_run(func_expr, string(fname), 123)
+    end
+    return true
+end
+
+@test test_jit_with_annot_2()
 
 function test_jit_with_gumtree()
     code1 = :(
@@ -66,11 +57,11 @@ function test_jit_with_gumtree()
 
     code2 = :(
         function cell1_1(y)
-            x = 123
+            x = 124
             if x <= 1
                 x = x + 2
             end
-            y = y * 2
+            x = x * 2
             return x + y
         end)
 
@@ -89,7 +80,7 @@ function test_jit_with_gumtree()
     # TODO: Precise extract variables that have been designated as "edited."
     @show N
     @show env = create_env_from_mapping(N)
-    env[:x] = :(123)
+    # env[:x] = :(123)
     func_expr, fname = simply_and_make_entry(code2, env)
     @show func_expr
     @show res = compile_and_run(func_expr, string(fname), 123)

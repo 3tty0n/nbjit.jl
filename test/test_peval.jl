@@ -66,11 +66,27 @@ end"""
     # println("\nSimplified Code:")
     # println(Meta.show_sexpr(simplified))
 
-    func = create_entry(code2, env)
-    println("\nCreated function entry")
-    println(func)
-
     return true
 end
 
-@test test2()
+# @test test2()
+
+function test_extract_function()
+    code = quote
+        x = 1
+        y = 2
+        function f()
+            return 1
+        end
+
+        f()
+    end
+
+    funcs = []
+    rest = []
+    extract_function_block(code, funcs, rest)
+    println(funcs)
+    println(rest)
+end
+
+test_extract_function()
