@@ -66,9 +66,18 @@ function collect_hole(expr::Expr)
     end
 end
 
+hole_id = -1
+
+function get_hole_id()
+    global hole_id += 1
+    return hole_id
+end
+
 convert_ast_with_hole(expr) = expr
 
 """
+    conert_ast_with_hole(expr) -> expr
+
     convert the ast into the `holing' ast
     it converts @hole annotated expr into Expr(:hole, ...)
 """
@@ -82,7 +91,7 @@ function convert_ast_with_hole(expr::Expr)
                     x -> !(x isa LineNumberNode),
                     args[2:end]
                 ))
-            return Expr(:hole, newargs...)
+            return Expr(:hole, newargs..., get_hole_id())
         end
         return expr
     elseif expr.head == :if
@@ -108,11 +117,27 @@ function convert_ast_with_hole(expr::Expr)
 end
 
 """
-    split_at_hole(expr) -> expr, expr
+    create_hole_block(expr) -> expr
+
+    Create a block that contains a hole AST node
+"""
+function create_hole_block(expr::Expr)
+    hole_id = expr.args[end]
+
+    new_expr = expr.args[1:end-1]
+
+    return quote
+        $(new_expr...)
+    end
+end
+
+"""
+    split_at_hole(expr) -> expr, int
 
     Split ast at the place of a hole node
     When splitting the ast, it estimates the guard symbols by
     calculating free variables in `pre_args'.
+    Then returns the block with a hole and hole block
 """
 function split_at_hole(block::Expr)
     @assert block.head in (:block, :toplevel, :begin)
@@ -129,14 +154,15 @@ function split_at_hole(block::Expr)
     hole_expr = block.args[idx]
     post_args = block.args[idx+1:end]
 
-
     syms_in_pre = collect(flatten([collect_symbols(a) for a in pre_args]))
     syms_in_hole = collect(flatten([collect_symbols(a) for a in hole_expr.args]))
     guard_syms = vcat(syms_in_pre, syms_in_hole)
 
-    hole_expr = Expr(:hole, guard_syms)
 
-    return block, hole_expr
+    block.args[idx] = Expr(:hole, guard_syms)
+    hole_block = create_hole_block(hole_expr)
+
+    return block, hole_block
 end
 
 end
