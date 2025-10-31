@@ -11,7 +11,7 @@ function propagate_constants(expr, unfolded_vars, env)
         else
             return expr
         end
-    elseif expr isa Symbol
+    elseif expr isa Expr
         new_args = [propagate_constants(arg, unfolded_vars, env)
                     for arg in expr.args]
         return Expr(expr.head, new_args...)
@@ -21,18 +21,24 @@ function propagate_constants(expr, unfolded_vars, env)
 end
 
 function _can_fold(expr, unfolded_vars)
+    # Returns true if expr is NOT in unfolded_vars (i.e., it can be folded)
+    # Returns false if expr IS in unfolded_vars (i.e., it should remain dynamic)
     for unfolded_expr in unfolded_vars
         if unfolded_expr == expr
-            return true
-        else
-            return _can_fold(unfolded_expr, unfolded_vars)
+            return false  # expr is in unfolded_vars, so it CANNOT be folded
         end
     end
-    return false
+    return true  # expr is not in unfolded_vars, so it CAN be folded
 end
 
 function can_fold(expr, unfolded_vars, env)
-    return _can_fold(expr, unfolded_vars)
+    # Check if the expression can be folded (i.e., it's not in unfolded_vars)
+    # Also check if it's actually in the environment (for symbols)
+    if expr isa Symbol
+        return _can_fold(expr, unfolded_vars) && haskey(env, expr)
+    else
+        return _can_fold(expr, unfolded_vars)
+    end
 end
 
 function evaluate_binary(op, lhs, rhs)
@@ -62,22 +68,20 @@ function partial_evaluate_binary(expr, unfolded_vars, env)
     lhs = expr.args[2]
     rhs = expr.args[3]
 
-    if can_fold(lhs, unfolded_vars, env) && can_fold(rhs, unfolded_vars, env)
-        lhs = get(env, lhs, lhs)
-        rhs = get(env, rhs, rhs)
+    # Recursively evaluate operands
+    lhs_eval = partial_evaluate(lhs, unfolded_vars, env)
+    rhs_eval = partial_evaluate(rhs, unfolded_vars, env)
+
+    # If both operands are constants, evaluate at compile time
+    if is_constant(lhs_eval) && is_constant(rhs_eval)
         try
-            return evaluate_binary(op, lhs, rhs)
+            return evaluate_binary(op, lhs_eval, rhs_eval)
         catch
-            return Expr(:call, op, lhs, rhs)
+            return Expr(:call, op, lhs_eval, rhs_eval)
         end
-    elseif !(lhs in unfolded_vars)
-        lhs = env[lhs]
-        return Expr(:call, op, lhs, rhs)
-    elseif !(rhs in unfolded_vars)
-        rhs = env[rhs]
-        return Expr(:call, op, lhs, rhs)
     else
-        return expr
+        # Return expression with evaluated operands
+        return Expr(:call, op, lhs_eval, rhs_eval)
     end
 end
 
@@ -191,12 +195,90 @@ function partial_evaluate(expr, unfolded_vars, env)
                     partial_evaluate(els, unfolded_vars, env))
             end
         end
-    elseif head == :for || head == :while || head == :let
-        # TODO: make it work
+    elseif head == :for
+        # For loop: for <iter_spec> <body> end
+        # args[1] is the iteration specification (e.g., i = 1:10)
+        # args[2] is the loop body
+        iter_spec = expr.args[1]
+        body = expr.args[2]
+
+        # Create a new environment for the loop scope
+        inner_env = copy(env)
+
+        # Try to evaluate the iteration specification
+        if iter_spec isa Expr && iter_spec.head == :(=)
+            iter_var = iter_spec.args[1]
+            iter_range = partial_evaluate(iter_spec.args[2], unfolded_vars, env)
+
+            # Check if we can fully evaluate the range at compile time
+            if is_constant(iter_range) || (iter_range isa Expr && iter_range.head == :call && iter_range.args[1] == :(:))
+                # Try to unroll if the range is known and small
+                if iter_range isa Expr && iter_range.args[1] == :(:) &&
+                   all(is_constant, iter_range.args[2:end])
+                    # Evaluate the range
+                    try
+                        start_val = iter_range.args[2]
+                        end_val = iter_range.args[3]
+                        if is_constant(start_val) && is_constant(end_val)
+                            range_vals = start_val:end_val
+                            # Only unroll small loops (max 10 iterations)
+                            if length(range_vals) <= 10
+                                unrolled = []
+                                for val in range_vals
+                                    loop_env = copy(inner_env)
+                                    loop_env[iter_var] = val
+                                    unrolled_body = partial_evaluate(body, unfolded_vars, loop_env)
+                                    push!(unrolled, unrolled_body)
+                                end
+                                return Expr(:block, unrolled...)
+                            end
+                        end
+                    catch
+                        # Fall through to regular handling
+                    end
+                end
+            end
+
+            # If we can't unroll, just propagate constants through the body
+            new_iter_spec = Expr(:(=), iter_var, iter_range)
+            new_body = partial_evaluate(body, unfolded_vars, inner_env)
+            return Expr(:for, new_iter_spec, new_body)
+        else
+            # Unknown iteration format, process conservatively
+            new_args = [partial_evaluate(a, unfolded_vars, inner_env) for a in expr.args]
+            return Expr(:for, new_args...)
+        end
+    elseif head == :while
+        # While loop: while <condition> <body> end
+        cond = expr.args[1]
+        body = expr.args[2]
+
+        # Create a new environment for the loop scope
+        inner_env = copy(env)
+
+        # Evaluate the condition
+        new_cond = partial_evaluate(cond, unfolded_vars, env)
+
+        # Check if the condition is a constant
+        if new_cond === false
+            # Loop never executes
+            return nothing
+        elseif new_cond === true
+            # Infinite loop - keep as is but optimize body
+            new_body = partial_evaluate(body, unfolded_vars, inner_env)
+            return Expr(:while, true, new_body)
+        else
+            # Condition is dynamic, optimize the body
+            new_body = partial_evaluate(body, unfolded_vars, inner_env)
+            return Expr(:while, new_cond, new_body)
+        end
+    elseif head == :let
+        # Let binding: let <bindings> <body> end
+        # Create a new environment for the let scope
         inner_env = copy(env)
         new_args = [partial_evaluate(a, unfolded_vars, inner_env)
                     for a in expr.args]
-        return Expr(head, new_args...)
+        return Expr(:let, new_args...)
     elseif head == :return || head == :break || head == :continue
         new_args = [partial_evaluate(a, unfolded_vars, env) for a in expr.args]
         return Expr(head, new_args...)
