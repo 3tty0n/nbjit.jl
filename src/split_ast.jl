@@ -138,15 +138,22 @@ end
     When splitting the ast, it estimates the guard symbols by
     calculating free variables in `pre_args'.
     Then returns the block with a hole and hole block
+
+    NOTE: This function only handles a single hole for backward compatibility.
+    For multiple holes, use `split_at_holes`.
 """
 function split_at_hole(block::Expr)
-    @assert block.head in (:block, :toplevel, :begin)
+    @assert block.head in (:block, :toplevel, :begin) "Expected :block, :toplevel, or :begin, got: $(block.head)"
+
     # locate the hole
     idx = findfirst(x -> isa(x,Expr) && x.head === :hole, block.args)
     if idx === nothing
         error("no hole found in: $block")
-    elseif count(x -> isa(x,Expr) && x.head === :hole, block.args) != 1
-        error("expected exactly one hole, got multiple")
+    end
+
+    hole_count = count(x -> isa(x,Expr) && x.head === :hole, block.args)
+    if hole_count != 1
+        error("expected exactly one hole, got $hole_count. Use split_at_holes for multiple holes.")
     end
 
     # slice into before / hole / after
@@ -156,13 +163,108 @@ function split_at_hole(block::Expr)
 
     syms_in_pre = collect(flatten([collect_symbols(a) for a in pre_args]))
     syms_in_hole = collect(flatten([collect_symbols(a) for a in hole_expr.args]))
-    guard_syms = vcat(syms_in_pre, syms_in_hole)
-
+    guard_syms = unique(vcat(syms_in_pre, syms_in_hole))
 
     block.args[idx] = Expr(:hole, guard_syms)
     hole_block = create_hole_block(hole_expr)
 
     return block, hole_block
 end
+
+"""
+    split_at_holes(expr) -> [(expr, hole_block, guard_syms)]
+
+    Split AST at all hole nodes, returning a list of results.
+    Each result is a tuple of (modified_block, hole_block, guard_symbols).
+
+    This function handles multiple holes by processing them in order,
+    keeping track of symbols defined before each hole for guard calculation.
+"""
+function split_at_holes(block::Expr)
+    @assert block.head in (:block, :toplevel, :begin) "Expected :block, :toplevel, or :begin, got: $(block.head)"
+
+    # Find all hole indices
+    hole_indices = findall(x -> isa(x, Expr) && x.head === :hole, block.args)
+
+    if isempty(hole_indices)
+        error("no holes found in: $block")
+    end
+
+    results = []
+
+    for idx in hole_indices
+        # Get symbols defined before this hole
+        pre_args = block.args[1:idx-1]
+        hole_expr = block.args[idx]
+
+        # Collect symbols from before the hole and in the hole
+        syms_in_pre = collect(flatten([collect_symbols(a) for a in pre_args]))
+        syms_in_hole = collect(flatten([collect_symbols(a) for a in hole_expr.args]))
+        guard_syms = unique(vcat(syms_in_pre, syms_in_hole))
+
+        # Create the hole block
+        hole_block = create_hole_block(hole_expr)
+
+        # Create a copy of the block with this hole replaced by guard info
+        modified_block = copy(block)
+        modified_block.args[idx] = Expr(:hole, guard_syms)
+
+        push!(results, (modified_block, hole_block, guard_syms))
+    end
+
+    return results
+end
+
+"""
+    validate_ast_for_splitting(expr) -> Bool
+
+    Validates that an AST is suitable for splitting:
+    - Contains at least one hole
+    - Holes are properly formed
+    - No nested holes (holes within holes)
+"""
+function validate_ast_for_splitting(block::Expr)
+    if !(block.head in (:block, :toplevel, :begin))
+        return false, "Block must have head :block, :toplevel, or :begin, got: $(block.head)"
+    end
+
+    # Check for holes
+    hole_count = count(x -> isa(x, Expr) && x.head === :hole, block.args)
+    if hole_count == 0
+        return false, "No holes found in block"
+    end
+
+    # Check for nested holes (not supported)
+    for arg in block.args
+        if isa(arg, Expr) && arg.head === :hole
+            for inner_arg in arg.args
+                if isa(inner_arg, Expr) && contains_hole(inner_arg)
+                    return false, "Nested holes are not supported"
+                end
+            end
+        end
+    end
+
+    return true, "Valid"
+end
+
+"""
+    contains_hole(expr) -> Bool
+
+    Recursively checks if an expression contains a hole node.
+"""
+function contains_hole(expr::Expr)
+    if expr.head === :hole
+        return true
+    end
+    for arg in expr.args
+        if isa(arg, Expr) && contains_hole(arg)
+            return true
+        end
+    end
+    return false
+end
+
+contains_hole(::Any) = false
 
 end
