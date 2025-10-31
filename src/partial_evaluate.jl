@@ -112,6 +112,10 @@ function partial_evaluate(expr, unfolded_vars, env)
         else
             return expr
         end
+    elseif head == :hole
+        # Hole expressions are left as-is during partial evaluation
+        # They will be handled during AST splitting
+        return expr
     elseif head in [:+, :-, :*, :/, :<, :>, :<=, :>=]
         return partial_evaluate_binary(expr, unfolded_vars, env)
     elseif head == :&& || head == :||
