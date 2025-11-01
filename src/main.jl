@@ -1,19 +1,27 @@
-include("./partial_evaluate.jl")
-include("./jit.jl")
+include("./split_jit.jl")
 
-function main(path)
-    # read file
-    f = open(path, "r")
-    s = read(f, String)
-    ex = Meta.parse(s)
+"""
+    run_file(path; env=Dict{Symbol,Any}())
 
-    # partial the source program
-    @show func_expr, fname = partial_evaluate_and_make_entry(ex)
-
-    # compile code and run
-    # TODO: think about the way to integrate with notebook
-    res = compile_and_run(func_expr, string(fname), 123)
-    println(res)
+Compile the code at `path` using the split JIT runtime and execute it against
+an optional environment dictionary. The resulting bindings from the execution
+are merged back into `env`, which is also returned to the caller.
+"""
+function run_file(path; env::Dict{Symbol,Any}=Dict{Symbol,Any}())
+    source = read(path, String)
+    code = Meta.parse(source)
+    compiled = split_and_compile(code)
+    println("Main function: $(compiled.main_fname) with inputs $(compiled.main_inputs)")
+    for (i, fname) in enumerate(compiled.hole_fnames)
+        println("Hole $i -> $(fname) with inputs $(compiled.hole_inputs[i])")
+    end
+    return compiled
 end
 
-main(ARGS[1])
+function main(path)
+    run_file(path)
+end
+
+if abspath(PROGRAM_FILE) == @__FILE__ && !isempty(ARGS)
+    main(ARGS[1])
+end
