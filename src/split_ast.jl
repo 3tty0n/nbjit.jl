@@ -95,11 +95,9 @@ function convert_ast_with_hole(expr::Expr)
         end
         return expr
     elseif expr.head == :if
-        return Expr(
-            :if,
-            [convert_ast_with_hole(e) for e in expr.args[2]],
-            [convert_ast_with_hole(e) for e in expr.args[3]]
-        )
+        # :if structure: args[1] = condition, args[2] = then, args[3] = else (optional)
+        new_args = [convert_ast_with_hole(a) for a in expr.args]
+        return Expr(:if, new_args...)
     elseif expr.head == :for || expr.head == :while || expr.head == :let
         new_args = [convert_ast_with_hole(a) for a in expr.args]
         return Expr(expr.head, new_args...)
