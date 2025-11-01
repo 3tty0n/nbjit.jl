@@ -1,7 +1,5 @@
-
 using LLVM
 
-# Keeps track of the variables that are in the current scope
 struct Scope
     values::Dict{String, LLVM.User}
     parent::Scope
@@ -10,7 +8,6 @@ struct Scope
     Scope(parent::Scope) = new(Dict{String, LLVM.User}(), parent)
 end
 
-# Look for variable in `scope` and if not found, look recursively in parent
 function _get(scope::Scope, var::String, default)
     v = get(scope.values, var, nothing)
     if v != nothing
