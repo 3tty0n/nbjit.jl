@@ -122,15 +122,28 @@ function prepare_split(code)
 
     if hole_count == 1
         main_block, hole_block = SplitAst.split_at_hole(ast_with_holes)
-        main_ast = deepcopy(main_block)
         hole_blocks = [deepcopy(hole_block)]
         hole_expr_idx = findfirst(x -> isa(x, Expr) && x.head === :hole, main_block.args)
         guard_syms = [hole_expr_idx === nothing ? Symbol[] : flatten_guard_syms(main_block.args[hole_expr_idx].args)]
+
+        # Normalize main_ast with content-independent placeholder
+        main_ast = deepcopy(main_block)
+        if hole_expr_idx !== nothing
+            main_ast.args[hole_expr_idx] = Expr(:hole, 1)
+        end
     else
         results = SplitAst.split_at_holes(ast_with_holes)
-        main_ast = deepcopy(results[1][1])
         hole_blocks = [deepcopy(r[2]) for r in results]
         guard_syms = [flatten_guard_syms(r[3]) for r in results]
+
+        # Create main_ast with ALL holes replaced by simple placeholders
+        # Use hole index as placeholder to make it content-independent
+        main_ast = deepcopy(ast_with_holes)
+        hole_indices = findall(x -> isa(x, Expr) && x.head === :hole, main_ast.args)
+        for (idx, hole_idx) in enumerate(hole_indices)
+            # Use a simple placeholder that only depends on hole position, not content
+            main_ast.args[hole_idx] = Expr(:hole, idx)
+        end
     end
 
     return main_ast, hole_blocks, guard_syms
