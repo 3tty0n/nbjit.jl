@@ -24,13 +24,15 @@ mutable struct CodeGen
     current_scope::CurrentScope
     mod::LLVM.Module
     type_env::Dict{String, LLVM.LLVMType}  # Track variable types
+    string_cache::Dict{String, LLVM.Value}  # Cache for string constants
 
     CodeGen() =
         new(
             LLVM.IRBuilder(),
             CurrentScope(),
             LLVM.Module("nbjit"),
-            Dict{String, LLVM.LLVMType}()
+            Dict{String, LLVM.LLVMType}(),
+            Dict{String, LLVM.Value}()
         )
 end
 
@@ -76,6 +78,49 @@ end
 
 function codegen(cg::CodeGen, ::Nothing)
     return
+end
+
+function codegen(cg::CodeGen, str::String)
+    # Handle string literals by creating global string constants
+    if haskey(cg.string_cache, str)
+        return cg.string_cache[str]
+    end
+
+    # Create a global string constant with newline and null terminator
+    str_with_newline = str * "\n"
+    bytes = Vector{UInt8}(str_with_newline)
+    push!(bytes, 0)  # null terminator
+
+    str_type = LLVM.ArrayType(LLVM.Int8Type(), length(bytes))
+    str_global = LLVM.GlobalVariable(cg.mod, str_type, "str")
+    LLVM.linkage!(str_global, LLVM.API.LLVMPrivateLinkage)
+
+    # Create constant data array from bytes
+    str_init = LLVM.ConstantDataArray(bytes)
+    LLVM.initializer!(str_global, str_init)
+
+    # Get pointer to string
+    zero = LLVM.ConstantInt(LLVM.Int64Type(), 0)
+    str_ptr = LLVM.gep!(cg.builder, str_type, str_global, [zero, zero])
+
+    cg.string_cache[str] = str_ptr
+    return str_ptr
+end
+
+function get_or_declare_printf(cg::CodeGen)
+    # Check if printf is already declared
+    if haskey(LLVM.functions(cg.mod), "printf")
+        return LLVM.functions(cg.mod)["printf"]
+    end
+
+    # Declare printf as external function
+    # int printf(const char *format, ...)
+    i8_ptr = LLVM.PointerType(LLVM.Int8Type())
+    printf_type = LLVM.FunctionType(LLVM.Int32Type(), [i8_ptr]; vararg=true)
+    printf_func = LLVM.Function(cg.mod, "printf", printf_type)
+    LLVM.linkage!(printf_func, LLVM.API.LLVMExternalLinkage)
+
+    return printf_func
 end
 
 function codegen(cg::CodeGen, expr::Expr)
@@ -217,6 +262,38 @@ function codegen(cg::CodeGen, expr::Expr)
             else
                 return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntNE, L, R, "cmptmp")
             end
+        elseif expr.args[1] == :println
+            # Handle println specially
+            printf_func = get_or_declare_printf(cg)
+            printf_type = LLVM.function_type(printf_func)
+
+            if length(expr.args) == 1
+                # println() with no arguments - just print newline
+                format_str = codegen(cg, "")
+                LLVM.call!(cg.builder, printf_type, printf_func, [format_str])
+            else
+                # println with arguments
+                for arg in expr.args[2:end]
+                    arg_val = codegen(cg, arg)
+
+                    if arg isa String
+                        # Already has newline from codegen(cg, str)
+                        LLVM.call!(cg.builder, printf_type, printf_func, [arg_val])
+                    elseif LLVM.value_type(arg_val) == LLVM.Int64Type()
+                        format_str = codegen(cg, "%ld")
+                        LLVM.call!(cg.builder, printf_type, printf_func, [format_str, arg_val])
+                    elseif LLVM.value_type(arg_val) == LLVM.DoubleType()
+                        format_str = codegen(cg, "%f")
+                        LLVM.call!(cg.builder, printf_type, printf_func, [format_str, arg_val])
+                    elseif LLVM.value_type(arg_val) == LLVM.Int1Type()
+                        # Convert bool to int64 for printing
+                        int_val = LLVM.zext!(cg.builder, arg_val, LLVM.Int64Type(), "bool_to_int")
+                        format_str = codegen(cg, "%ld")
+                        LLVM.call!(cg.builder, printf_type, printf_func, [format_str, int_val])
+                    end
+                end
+            end
+            return LLVM.ConstantInt(LLVM.Int64Type(), 0)
         elseif expr.args[1] isa Symbol
             callee = expr.args[1]
             julia_args = expr.args[2:end]
