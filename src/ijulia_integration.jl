@@ -11,6 +11,10 @@ mutable struct NotebookSession
     hole_hashes::Dict{String, Vector{UInt64}}
     guard_signatures::Dict{String, Vector{Vector{Symbol}}}
     pure_cache::Dict{String, UInt64}  # For cells without holes
+    execution_counts::Dict{String, Int}  # Track execution count per cell
+    guard_env::Dict{String, Dict{Symbol, Any}}  # Track guard variable values
+    # Content-based lookup: (main_hash, guard_sig) -> cell_id
+    content_index::Dict{Tuple{UInt64, Vector{Vector{Symbol}}}, String}
 end
 
 NotebookSession() = NotebookSession(
@@ -18,7 +22,10 @@ NotebookSession() = NotebookSession(
     Dict{String, UInt64}(),
     Dict{String, Vector{UInt64}}(),
     Dict{String, Vector{Vector{Symbol}}}(),
-    Dict{String, UInt64}()
+    Dict{String, UInt64}(),
+    Dict{String, Int}(),
+    Dict{String, Dict{Symbol, Any}}(),
+    Dict{Tuple{UInt64, Vector{Vector{Symbol}}}, String}()
 )
 
 const DEFAULT_SESSION = Ref{NotebookSession}(NotebookSession())
@@ -60,8 +67,25 @@ function update_cache!(session::NotebookSession, cell_id::String,
     session.guard_signatures[cell_id] = guard_syms
 end
 
+"""
+    run_cell!(session::NotebookSession, code::Expr; cell_id::AbstractString) -> CellResult
+
+Execute code following the multi-phase execution model from ex1.jl:
+  - 1st execution: HOLE detection → constant propagation → split compilation
+  - 2nd+ executions: Guard checking → fast path (reuse) or slow path (recompile)
+    - Fast path: only recompile holes that changed
+    - Slow path: full recompile if guards change or holes modify guard variables
+
+Content-based caching: If the same code is executed in different cells (e.g., re-executing
+a notebook cell creates a new cell ID), we reuse the cached compilation.
+"""
 function run_cell!(session::NotebookSession, code::Expr; cell_id::AbstractString)
     cell_key = String(cell_id)
+
+    # Increment execution count
+    exec_count = get(session.execution_counts, cell_key, 0) + 1
+    session.execution_counts[cell_key] = exec_count
+
     main_ast, hole_blocks, guard_syms = prepare_split(code)
     main_hash = compute_ast_hash(main_ast)
     hole_hashes = [compute_ast_hash(block) for block in hole_blocks]
@@ -70,23 +94,52 @@ function run_cell!(session::NotebookSession, code::Expr; cell_id::AbstractString
     recompiled_holes = Int[]
     compiled = nothing
 
-    if !haskey(session.cells, cell_key)
-        compiled = split_and_compile(code)
-        rebuilt_main = true
-        recompiled_holes = collect(1:length(hole_blocks))
-    else
+    # Content-based lookup: check if we've seen this exact structure before
+    content_key = (main_hash, guard_syms)
+    similar_cell_id = get(session.content_index, content_key, nothing)
+
+    # Check if current cell has cached data
+    has_cell_cache = haskey(session.cells, cell_key)
+
+    # Try to reuse from similar cell if current cell has no cache
+    if !has_cell_cache && similar_cell_id !== nothing && haskey(session.cells, similar_cell_id)
+        # Found similar cell with same main structure and guards
+        compiled = session.cells[similar_cell_id]
+        old_hole_hashes = session.hole_hashes[similar_cell_id]
+
+        # Fast path: only recompile changed holes
+        recompiled = Int[]
+        for (idx, hhash) in enumerate(hole_hashes)
+            if idx <= length(old_hole_hashes) && hhash != old_hole_hashes[idx]
+                recompile_hole!(compiled, idx, hole_blocks[idx])
+                push!(recompiled, idx)
+            elseif idx > length(old_hole_hashes)
+                # New hole added
+                compiled = split_and_compile(code)
+                rebuilt_main = true
+                recompiled_holes = collect(1:length(hole_blocks))
+                @goto update_cache
+            end
+        end
+        recompiled_holes = recompiled
+        rebuilt_main = false
+    # Use existing cache for this cell
+    elseif has_cell_cache
         compiled = session.cells[cell_key]
         old_main_hash = session.main_hashes[cell_key]
         old_hole_hashes = session.hole_hashes[cell_key]
         old_guards = session.guard_signatures[cell_key]
 
+        # Check if guard symbols changed or main block structure changed
         if main_hash != old_main_hash ||
            length(hole_hashes) != length(old_hole_hashes) ||
            guard_syms != old_guards
+            # Slow path: full recompilation needed
             compiled = split_and_compile(code)
             rebuilt_main = true
             recompiled_holes = collect(1:length(hole_blocks))
         else
+            # Fast path: only recompile changed holes
             recompiled = Int[]
             for (idx, hhash) in enumerate(hole_hashes)
                 if hhash != old_hole_hashes[idx]
@@ -96,10 +149,19 @@ function run_cell!(session::NotebookSession, code::Expr; cell_id::AbstractString
             end
             recompiled_holes = recompiled
         end
+    # First time seeing this code structure
+    else
+        compiled = split_and_compile(code)
+        rebuilt_main = true
+        recompiled_holes = collect(1:length(hole_blocks))
     end
 
+    @label update_cache
     compiled isa CompiledSplitCode || error("Unexpected compilation state")
     update_cache!(session, cell_key, compiled, main_hash, hole_hashes, guard_syms)
+
+    # Update content index to point to this cell
+    session.content_index[content_key] = cell_key
 
     return CellResult(cell_key, compiled, recompiled_holes, rebuilt_main)
 end
