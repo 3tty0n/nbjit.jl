@@ -46,6 +46,8 @@ function evaluate_binary(op, lhs, rhs)
         return lhs * rhs
     elseif op == :/
         return lhs / rhs
+    elseif op == :%
+        return lhs % rhs
     elseif op == :<
         return lhs < rhs
     elseif op == :>
@@ -54,6 +56,10 @@ function evaluate_binary(op, lhs, rhs)
         return lhs <= rhs
     elseif op == :>=
         return lhs >= rhs
+    elseif op == :(==)
+        return lhs == rhs
+    elseif op == :(!=)
+        return lhs != rhs
     else
         error("unsupported op ", op)
     end
@@ -107,7 +113,7 @@ function partial_evaluate(expr, unfolded_vars, env)
         end
     elseif head == :hole
         return expr
-    elseif head in [:+, :-, :*, :/, :<, :>, :<=, :>=]
+    elseif head in [:+, :-, :*, :/, :%, :<, :>, :<=, :>=, :(==), :(!=)]
         return partial_evaluate_binary(expr, unfolded_vars, env)
     elseif head == :&& || head == :||
         lhs = partial_evaluate(expr.args[1], unfolded_vars, env)
@@ -145,7 +151,7 @@ function partial_evaluate(expr, unfolded_vars, env)
     elseif expr.head == :call
         args = expr.args
 
-        if args[1] in [:+, :-, :*, :/, :<, :>, :<=, :>=]
+        if args[1] in [:+, :-, :*, :/, :%, :<, :>, :<=, :>=, :(==), :(!=)]
             return partial_evaluate_binary(expr, unfolded_vars, env)
         end
 
