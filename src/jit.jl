@@ -23,12 +23,14 @@ mutable struct CodeGen
     builder::LLVM.IRBuilder
     current_scope::CurrentScope
     mod::LLVM.Module
+    type_env::Dict{String, LLVM.LLVMType}  # Track variable types
 
     CodeGen() =
         new(
             LLVM.IRBuilder(),
             CurrentScope(),
-            LLVM.Module("nbjit")
+            LLVM.Module("nbjit"),
+            Dict{String, LLVM.LLVMType}()
         )
 end
 
@@ -44,14 +46,32 @@ function codegen(cg::CodeGen, expr::Int64)
     return LLVM.ConstantInt(LLVM.IntType(64), expr)
 end
 
+function codegen(cg::CodeGen, expr::Float64)
+    return LLVM.ConstantFP(LLVM.DoubleType(), expr)
+end
+
+function codegen(cg::CodeGen, expr::Bool)
+    return LLVM.ConstantInt(LLVM.Int1Type(), expr ? 1 : 0)
+end
+
 function codegen(cg::CodeGen, expr::Symbol)
     if expr == :nothing
         return
     end
 
+    # Handle special boolean symbols
+    if expr == :true
+        return LLVM.ConstantInt(LLVM.Int1Type(), 1)
+    elseif expr == :false
+        return LLVM.ConstantInt(LLVM.Int1Type(), 0)
+    end
+
     V = get(current_scope(cg), string(expr), nothing)
     V == nothing && error("did not find variable $(expr)")
-    return LLVM.load!(cg.builder, LLVM.Int64Type(), V, string(expr))
+
+    # Get the type from type_env
+    var_type = get(cg.type_env, string(expr), LLVM.Int64Type())
+    return LLVM.load!(cg.builder, var_type, V, string(expr))
 end
 
 function codegen(cg::CodeGen, ::Nothing)
@@ -64,12 +84,24 @@ function codegen(cg::CodeGen, expr::Expr)
         local V
         var = string(expr.args[1])
         initval = codegen(cg, expr.args[2])
+
+        # Determine type from the initializer
+        llvm_type = LLVM.value_type(initval)
+
+        # Auto-extend Int1 (bool) to Int64 for easier arithmetic
+        if llvm_type == LLVM.Int1Type()
+            initval = LLVM.zext!(cg.builder, initval, LLVM.IntType(64), "bool_to_int")
+            llvm_type = LLVM.IntType(64)
+        end
+
+        cg.type_env[var] = llvm_type
+
         if isglobalscope(current_scope(cg))
-            V = LLVM.GlobalVariable(cg.mod, LLVM.IntType(64), var)
+            V = LLVM.GlobalVariable(cg.mod, llvm_type, var)
             LLVM.initializer!(V, initval)
         else
             func = LLVM.parent(LLVM.position(cg.builder))
-            V = create_entry_block_allocation(cg, func, var)
+            V = create_entry_block_allocation(cg, func, var, llvm_type)
             LLVM.store!(cg.builder, initval, V)
         end
         current_scope(cg)[var] = V
@@ -80,37 +112,111 @@ function codegen(cg::CodeGen, expr::Expr)
             rhs = expr.args[3]
             L = codegen(cg, lhs)
             R = codegen(cg, rhs)
-            return LLVM.add!(cg.builder, L, R, "addtmp")
+            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+                return LLVM.fadd!(cg.builder, L, R, "addtmp")
+            else
+                return LLVM.add!(cg.builder, L, R, "addtmp")
+            end
         elseif expr.args[1] == :-
             lhs = expr.args[2]
             rhs = expr.args[3]
             L = codegen(cg, lhs)
             R = codegen(cg, rhs)
-            return LLVM.sub!(cg.builder, L, R, "subtmp")
+            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+                return LLVM.fsub!(cg.builder, L, R, "subtmp")
+            else
+                return LLVM.sub!(cg.builder, L, R, "subtmp")
+            end
         elseif expr.args[1] == :*
             lhs = expr.args[2]
             rhs = expr.args[3]
             L = codegen(cg, lhs)
             R = codegen(cg, rhs)
-            return LLVM.mul!(cg.builder, L, R, "multmp")
+            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+                return LLVM.fmul!(cg.builder, L, R, "multmp")
+            else
+                return LLVM.mul!(cg.builder, L, R, "multmp")
+            end
         elseif expr.args[1] == :/
             lhs = expr.args[2]
             rhs = expr.args[3]
             L = codegen(cg, lhs)
             R = codegen(cg, rhs)
-            return LLVM.sdiv!(cg.builder, L, R, "divtmp")
+            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+                return LLVM.fdiv!(cg.builder, L, R, "divtmp")
+            else
+                return LLVM.sdiv!(cg.builder, L, R, "divtmp")
+            end
+        elseif expr.args[1] == :%
+            lhs = expr.args[2]
+            rhs = expr.args[3]
+            L = codegen(cg, lhs)
+            R = codegen(cg, rhs)
+            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+                return LLVM.frem!(cg.builder, L, R, "modtmp")
+            else
+                return LLVM.srem!(cg.builder, L, R, "modtmp")
+            end
         elseif expr.args[1] == :<
             lhs = expr.args[2]
             rhs = expr.args[3]
             L = codegen(cg, lhs)
             R = codegen(cg, rhs)
-            return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntSLT, L, R, "cmptmp")
+            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+                return LLVM.fcmp!(cg.builder, LLVM.API.LLVMRealOLT, L, R, "cmptmp")
+            else
+                return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntSLT, L, R, "cmptmp")
+            end
         elseif expr.args[1] == :>
             lhs = expr.args[2]
             rhs = expr.args[3]
             L = codegen(cg, lhs)
             R = codegen(cg, rhs)
-            return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntSGT, L, R, "cmptmp")
+            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+                return LLVM.fcmp!(cg.builder, LLVM.API.LLVMRealOGT, L, R, "cmptmp")
+            else
+                return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntSGT, L, R, "cmptmp")
+            end
+        elseif expr.args[1] == :<=
+            lhs = expr.args[2]
+            rhs = expr.args[3]
+            L = codegen(cg, lhs)
+            R = codegen(cg, rhs)
+            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+                return LLVM.fcmp!(cg.builder, LLVM.API.LLVMRealOLE, L, R, "cmptmp")
+            else
+                return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntSLE, L, R, "cmptmp")
+            end
+        elseif expr.args[1] == :>=
+            lhs = expr.args[2]
+            rhs = expr.args[3]
+            L = codegen(cg, lhs)
+            R = codegen(cg, rhs)
+            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+                return LLVM.fcmp!(cg.builder, LLVM.API.LLVMRealOGE, L, R, "cmptmp")
+            else
+                return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntSGE, L, R, "cmptmp")
+            end
+        elseif expr.args[1] == :(==)
+            lhs = expr.args[2]
+            rhs = expr.args[3]
+            L = codegen(cg, lhs)
+            R = codegen(cg, rhs)
+            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+                return LLVM.fcmp!(cg.builder, LLVM.API.LLVMRealOEQ, L, R, "cmptmp")
+            else
+                return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntEQ, L, R, "cmptmp")
+            end
+        elseif expr.args[1] == :(!=)
+            lhs = expr.args[2]
+            rhs = expr.args[3]
+            L = codegen(cg, lhs)
+            R = codegen(cg, rhs)
+            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+                return LLVM.fcmp!(cg.builder, LLVM.API.LLVMRealONE, L, R, "cmptmp")
+            else
+                return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntNE, L, R, "cmptmp")
+            end
         elseif expr.args[1] isa Symbol
             callee = expr.args[1]
             julia_args = expr.args[2:end]
@@ -157,13 +263,78 @@ function codegen(cg::CodeGen, expr::Expr)
                 current_scope(cg)[argname] = alloc
             end
             body = codegen(cg, expr.args[2])
-            LLVM.ret!(cg.builder, body === nothing ? LLVM.ConstantInt(LLVM.IntType(64), 0) : body)
+
+            # Convert return value to Int64 if necessary
+            if body === nothing
+                ret_val = LLVM.ConstantInt(LLVM.IntType(64), 0)
+            else
+                body_type = LLVM.value_type(body)
+                if body_type == LLVM.DoubleType()
+                    # Cast float to int
+                    ret_val = LLVM.fptosi!(cg.builder, body, LLVM.IntType(64), "fptosi")
+                elseif body_type == LLVM.Int1Type()
+                    # Extend bool to int64
+                    ret_val = LLVM.zext!(cg.builder, body, LLVM.IntType(64), "zext")
+                else
+                    ret_val = body
+                end
+            end
+            LLVM.ret!(cg.builder, ret_val)
         end
         return func
     elseif expr.head == :return
         rhs = expr.args[1]
         retval = codegen(cg, rhs)
         return retval
+    elseif expr.head == :&&
+        # Short-circuit AND: if lhs is false, return false, else return rhs
+        lhs = codegen(cg, expr.args[1])
+        func = LLVM.parent(LLVM.position(cg.builder))
+        rhs_block = LLVM.BasicBlock(func, "and_rhs")
+        merge_block = LLVM.BasicBlock(func, "and_merge")
+
+        # Check if lhs is true
+        zero = LLVM.ConstantInt(LLVM.Int1Type(), 0)
+        lhs_bool = LLVM.icmp!(cg.builder, LLVM.API.LLVMIntNE, lhs, zero, "lhs_bool")
+        lhs_pos = LLVM.position(cg.builder)
+        LLVM.br!(cg.builder, lhs_bool, rhs_block, merge_block)
+
+        # Evaluate rhs
+        LLVM.position!(cg.builder, rhs_block)
+        rhs = codegen(cg, expr.args[2])
+        rhs_pos = LLVM.position(cg.builder)
+        LLVM.br!(cg.builder, merge_block)
+
+        # Merge
+        LLVM.position!(cg.builder, merge_block)
+        phi = LLVM.phi!(cg.builder, LLVM.Int1Type(), "and_result")
+        append!(LLVM.incoming(phi), [(zero, lhs_pos), (rhs, rhs_pos)])
+        return phi
+    elseif expr.head == :||
+        # Short-circuit OR: if lhs is true, return true, else return rhs
+        lhs = codegen(cg, expr.args[1])
+        func = LLVM.parent(LLVM.position(cg.builder))
+        rhs_block = LLVM.BasicBlock(func, "or_rhs")
+        merge_block = LLVM.BasicBlock(func, "or_merge")
+
+        # Check if lhs is false
+        zero = LLVM.ConstantInt(LLVM.Int1Type(), 0)
+        one = LLVM.ConstantInt(LLVM.Int1Type(), 1)
+        lhs_bool = LLVM.icmp!(cg.builder, LLVM.API.LLVMIntEQ, lhs, zero, "lhs_bool")
+        lhs_pos = LLVM.position(cg.builder)
+        LLVM.br!(cg.builder, lhs_bool, rhs_block, merge_block)
+
+        # Evaluate rhs
+        LLVM.position!(cg.builder, rhs_block)
+        rhs = codegen(cg, expr.args[2])
+        rhs_pos = LLVM.position(cg.builder)
+        LLVM.br!(cg.builder, merge_block)
+
+        # Merge
+        LLVM.position!(cg.builder, merge_block)
+        phi = LLVM.phi!(cg.builder, LLVM.Int1Type(), "or_result")
+        append!(LLVM.incoming(phi), [(one, lhs_pos), (rhs, rhs_pos)])
+        return phi
     elseif expr.head == :if
         func = LLVM.parent(LLVM.position(cg.builder))
         then_block = LLVM.BasicBlock(func, "then")
@@ -188,10 +359,114 @@ function codegen(cg::CodeGen, expr::Expr)
             else_pos = LLVM.position(cg.builder)
 
             LLVM.position!(cg.builder, merge_block)
-            phi = LLVM.phi!(cg.builder, LLVM.Int64Type(), "iftmp")
+            # Infer type from then branch
+            result_type = LLVM.value_type(then_val)
+            phi = LLVM.phi!(cg.builder, result_type, "iftmp")
             append!(LLVM.incoming(phi), [(then_val, then_pos), (else_val, else_pos)])
             return phi
         end
+    elseif expr.head == :for
+        # Handle for loops: for i = start:end ... end
+        iter_spec = expr.args[1]
+        body = expr.args[2]
+
+        if !(iter_spec isa Expr && iter_spec.head == :(=))
+            error("Unsupported for loop format")
+        end
+
+        iter_var = string(iter_spec.args[1])
+        range_expr = iter_spec.args[2]
+
+        # Parse range (assume start:end format)
+        if !(range_expr isa Expr && range_expr.head == :call && range_expr.args[1] == :(:))
+            error("For loop range must be start:end")
+        end
+
+        start_val = codegen(cg, range_expr.args[2])
+        end_val = codegen(cg, range_expr.args[3])
+
+        func = LLVM.parent(LLVM.position(cg.builder))
+        loop_cond = LLVM.BasicBlock(func, "loop_cond")
+        loop_body = LLVM.BasicBlock(func, "loop_body")
+        loop_inc = LLVM.BasicBlock(func, "loop_inc")
+        loop_end = LLVM.BasicBlock(func, "loop_end")
+
+        # Allocate loop variable
+        iter_alloc = create_entry_block_allocation(cg, func, iter_var, LLVM.value_type(start_val))
+        LLVM.store!(cg.builder, start_val, iter_alloc)
+        current_scope(cg)[iter_var] = iter_alloc
+        cg.type_env[iter_var] = LLVM.value_type(start_val)
+
+        # Jump to condition
+        LLVM.br!(cg.builder, loop_cond)
+
+        # Condition: check if iter <= end
+        LLVM.position!(cg.builder, loop_cond)
+        iter_val = LLVM.load!(cg.builder, LLVM.value_type(start_val), iter_alloc, iter_var)
+        is_int = LLVM.value_type(start_val) == LLVM.IntType(64)
+        cond = if is_int
+            LLVM.icmp!(cg.builder, LLVM.API.LLVMIntSLE, iter_val, end_val, "loop_cond")
+        else
+            LLVM.fcmp!(cg.builder, LLVM.API.LLVMRealOLE, iter_val, end_val, "loop_cond")
+        end
+        LLVM.br!(cg.builder, cond, loop_body, loop_end)
+
+        # Body
+        LLVM.position!(cg.builder, loop_body)
+        new_scope(cg) do
+            codegen(cg, body)
+        end
+        LLVM.br!(cg.builder, loop_inc)
+
+        # Increment
+        LLVM.position!(cg.builder, loop_inc)
+        current_iter = LLVM.load!(cg.builder, LLVM.value_type(start_val), iter_alloc, iter_var)
+        one = if is_int
+            LLVM.ConstantInt(LLVM.IntType(64), 1)
+        else
+            LLVM.ConstantFP(LLVM.DoubleType(), 1.0)
+        end
+        next_iter = if is_int
+            LLVM.add!(cg.builder, current_iter, one, "next_iter")
+        else
+            LLVM.fadd!(cg.builder, current_iter, one, "next_iter")
+        end
+        LLVM.store!(cg.builder, next_iter, iter_alloc)
+        LLVM.br!(cg.builder, loop_cond)
+
+        # End
+        LLVM.position!(cg.builder, loop_end)
+        return LLVM.ConstantInt(LLVM.IntType(64), 0)
+    elseif expr.head == :while
+        # Handle while loops: while cond ... end
+        cond_expr = expr.args[1]
+        body = expr.args[2]
+
+        func = LLVM.parent(LLVM.position(cg.builder))
+        loop_cond = LLVM.BasicBlock(func, "while_cond")
+        loop_body = LLVM.BasicBlock(func, "while_body")
+        loop_end = LLVM.BasicBlock(func, "while_end")
+
+        # Jump to condition
+        LLVM.br!(cg.builder, loop_cond)
+
+        # Condition
+        LLVM.position!(cg.builder, loop_cond)
+        cond = codegen(cg, cond_expr)
+        zero = LLVM.ConstantInt(LLVM.Int1Type(), 0)
+        cond_bool = LLVM.icmp!(cg.builder, LLVM.API.LLVMIntNE, cond, zero, "while_cond")
+        LLVM.br!(cg.builder, cond_bool, loop_body, loop_end)
+
+        # Body
+        LLVM.position!(cg.builder, loop_body)
+        new_scope(cg) do
+            codegen(cg, body)
+        end
+        LLVM.br!(cg.builder, loop_cond)
+
+        # End
+        LLVM.position!(cg.builder, loop_end)
+        return LLVM.ConstantInt(LLVM.IntType(64), 0)
     elseif expr.head == :block
         local result = LLVM.ConstantInt(LLVM.IntType(64), 0)
         for stmt in expr.args
@@ -209,7 +484,7 @@ function codegen(cg::CodeGen, expr::Expr)
     end
 end
 
-function create_entry_block_allocation(cg::CodeGen, fn::LLVM.Function, varname::String)
+function create_entry_block_allocation(cg::CodeGen, fn::LLVM.Function, varname::String, llvm_type::LLVM.LLVMType=LLVM.IntType(64))
     LLVM.@dispose builder=LLVM.IRBuilder() begin
         entry_block = LLVM.entry(fn)
         if isempty(LLVM.instructions(entry_block))
@@ -217,7 +492,7 @@ function create_entry_block_allocation(cg::CodeGen, fn::LLVM.Function, varname::
         else
             LLVM.position!(builder, first(LLVM.instructions(entry_block)))
         end
-        return LLVM.alloca!(builder, LLVM.IntType(64), varname)
+        return LLVM.alloca!(builder, llvm_type, varname)
     end
 end
 
