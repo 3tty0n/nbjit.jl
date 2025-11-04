@@ -240,10 +240,54 @@ macro cache(code)
 end
 
 """
-    compile_and_execute(code::Expr) -> Int64
+    compile_to_native_library(mod::LLVM.Module, fname::Symbol) -> NativeCode
 
-Compile a code block to LLVM IR and execute it via JIT. Returns the result
-as an Int64.
+Compile LLVM module to a shared library and load it with dlopen.
+Returns NativeCode struct with library handle and function pointer.
+"""
+function compile_to_native_library(mod::LLVM.Module, fname::Symbol)
+    # Create target machine with PIC relocation model
+    triple = Sys.MACHINE
+    target = LLVM.Target(triple=triple)
+    # Create target machine with PIC (Position Independent Code) for shared libraries
+    tm = LLVM.TargetMachine(
+        target,
+        triple,
+        reloc=LLVM.API.LLVMRelocPIC,
+        optlevel=LLVM.API.LLVMCodeGenLevelDefault
+    )
+
+    # Compile to object file
+    obj_path = tempname() * ".o"
+    LLVM.emit(tm, mod, LLVM.API.LLVMObjectFile, obj_path)
+
+    # Link to shared library
+    lib_ext = Sys.iswindows() ? ".dll" : Sys.isapple() ? ".dylib" : ".so"
+    lib_path = tempname() * lib_ext
+
+    try
+        if Sys.islinux()
+            run(`gcc -shared -o $lib_path $obj_path`)
+        elseif Sys.isapple()
+            run(`clang -shared -o $lib_path $obj_path`)
+        elseif Sys.iswindows()
+            run(`cl /LD /Fe:$lib_path $obj_path`)
+        else
+            error("Unsupported platform for native library compilation")
+        end
+    finally
+        isfile(obj_path) && rm(obj_path)
+    end
+
+    lib_handle = Libdl.dlopen(lib_path)
+    func_ptr = Libdl.dlsym(lib_handle, fname)
+
+    return NativeCode(lib_handle, lib_path, fname, func_ptr)
+end
+
+
+"""
+    compile_and_execute(code::Expr) -> result
 """
 function compile_and_execute(code::Expr)
     # Wrap code in a zero-parameter function
@@ -257,19 +301,31 @@ function compile_and_execute(code::Expr)
 
     mod, ctx = compile_to_llvm(func_ast, fname)
 
-    # Execute via JIT
-    result = LLVM.JIT(mod) do engine
-        func_ptr = LLVM.lookup(engine, string(fname))
-        ccall(func_ptr, Int64, ())
-    end
-
+    native_code = compile_to_native_library(mod, fname)
     LLVM.dispose(ctx)
 
-    return result
+    try
+        return ccall(native_code.func_ptr, Int64, ())
+    finally
+        try
+            if native_code.lib_handle != C_NULL
+                Libdl.dlclose(native_code.lib_handle)
+            end
+        catch e
+            @warn "Failed to close pure cell library: $e"
+        end
+        if isfile(native_code.lib_path)
+            try
+                rm(native_code.lib_path)
+            catch e
+                @warn "Failed to remove pure cell library file: $e"
+            end
+        end
+    end
 end
 
 """
-    run_pure_cell!(session, code, cell_id)
+    run_pure_cell!(session, code, cell_id) -> nothing | result
 
 Execute and cache a cell without @hole markers. Returns the cell result or
 cached marker.
