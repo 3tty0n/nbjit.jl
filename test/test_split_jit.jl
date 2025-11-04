@@ -1,96 +1,81 @@
 using Test
 
-include("../src/split_jit.jl")
+include("../src/separate_dylib_compile.jl")
 
-function first_function_name(expr::Expr)
-    if expr.head == :block
-        for arg in expr.args
-            if arg isa Expr && arg.head == :function
-                return arg.args[1].args[1]
-            end
-        end
-    elseif expr.head == :function
-        return expr.args[1].args[1]
-    end
-    return nothing
-end
-
-@testset "Split and compile pipeline" begin
+@testset "AST splitting utilities" begin
     code = quote
         x = 10
-        @hole y = 2
-        z = x + y
+        temp = x + 1
+        @hole y = temp
+        result = x + y
+        result
     end
 
-    compiled = split_and_compile(code)
+    main_ast, hole_blocks, guard_syms = prepare_split(code)
+    @test length(hole_blocks) == 1
+    @test guard_syms == [[:x, :temp, :y]]
 
-    @testset "Main function compilation" begin
-        @test compiled.main_fname isa Symbol
-        @test compiled.main_mod !== nothing
-        @test compiled.main_inputs == [:x, :y]
-        main_ir = string(compiled.main_mod)
-        @test occursin("define i64 @$(compiled.main_fname)", main_ir)
+    placeholders = [stmt for stmt in main_ast.args if stmt isa Expr && stmt.head == :hole]
+    @test length(placeholders) == 1
+    @test first(placeholders[1].args) == 1
 
-        main_func_name = first_function_name(compiled.main_func_expr)
-        @test main_func_name == compiled.main_fname
+    hole_block = hole_blocks[1]
+    @test occursin("temp", sprint(show, hole_block))
+end
+
+@testset "Separate dylib compilation metadata" begin
+    code = quote
+        base = 5
+        @hole scale = base + 2
+        @hole offset = scale - 1
+        result = base * scale + offset
+        result
     end
 
-    @testset "Hole function compilation" begin
-        @test length(compiled.hole_mods) == 1
-        @test compiled.hole_mods[1] !== nothing
-        @test compiled.hole_inputs[1] == [:x, :y]
-        hole_ir = string(compiled.hole_mods[1])
-        @test occursin("define i64 @$(compiled.hole_fnames[1])", hole_ir)
+    compiled = compile_to_separate_dylibs(code)
 
-        hole_func_name = first_function_name(compiled.hole_func_exprs[1])
-        @test hole_func_name == compiled.hole_fnames[1]
-    end
+    try
+        @test compiled.main_lib_path !== nothing
+        @test isfile(compiled.main_lib_path)
+        @test length(compiled.hole_lib_paths) == 2
+        @test all(isfile, compiled.hole_lib_paths)
+        @test compiled.guard_syms == [[:base, :scale], [:base, :scale, :offset]]
+        @test compiled.hole_inputs == [[:base], [:base, :scale]]
 
-    @testset "Guard checking" begin
-        guard_env = Dict{Symbol, Any}(:x => 10, :y => 2)
-        @test check_guards(compiled, guard_env)
-
-        # Modify guard value - should fail check
-        guard_env[:x] = 20
-        @test !check_guards(compiled, guard_env)
+        result = execute_dylib(compiled)
+        @test result == 5 * 7 + 6  # Expected 41
+    finally
+        cleanup_dylib!(compiled)
     end
 end
 
-@testset "Selective hole recompilation" begin
+@testset "Selective hole recompilation via update_dylib!" begin
     code = quote
         a = 5
         @hole b = a + 1
         result = a * b
+        result
     end
 
-    compiled = split_and_compile(code)
-    main_mod_before = compiled.main_mod
-    hole_mod_before = compiled.hole_mods[1]
+    compiled = compile_to_separate_dylibs(code)
 
-    @testset "Successful hole recompilation" begin
-        new_hole = quote
-            b = a + 10
+    try
+        changed, rebuilt = update_dylib!(compiled, code)
+        @test isempty(changed)
+        @test !rebuilt
+
+        new_code = quote
+            a = 5
+            @hole b = a + 10
+            result = a * b
+            result
         end
 
-        recompile_hole!(compiled, 1, new_hole)
-
-        # Main module should remain unchanged
-        @test compiled.main_mod === main_mod_before
-
-        # Hole module should be different
-        @test compiled.hole_mods[1] !== hole_mod_before
-
-        # Function name should be consistent
-        @test first_function_name(compiled.hole_func_exprs[1]) == compiled.hole_fnames[1]
-
-        # Guard values should be cleared
-        @test isempty(compiled.guard_values)
-    end
-
-    @testset "Hole recompilation with invalid guards" begin
-        bad_hole = quote
-            b = a + c  # c is not in guard symbols
-        end
-        @test_throws ErrorException recompile_hole!(compiled, 1, bad_hole)
+        changed, rebuilt = update_dylib!(compiled, new_code)
+        @test changed == [1]
+        @test !rebuilt
+        @test execute_dylib(compiled) == 75
+    finally
+        cleanup_dylib!(compiled)
     end
 end
