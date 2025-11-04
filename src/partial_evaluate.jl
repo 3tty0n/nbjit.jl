@@ -67,20 +67,44 @@ end
 
 function partial_evaluate_binary(expr, unfolded_vars, env)
     op = expr.args[1]
-    lhs = expr.args[2]
-    rhs = expr.args[3]
 
-    lhs_eval = partial_evaluate(lhs, unfolded_vars, env)
-    rhs_eval = partial_evaluate(rhs, unfolded_vars, env)
+    # Handle variadic operations (e.g., x + a + b is represented as (:call, :+, :x, :a, :b))
+    if length(expr.args) > 3
+        # Evaluate all operands
+        operands = [partial_evaluate(arg, unfolded_vars, env) for arg in expr.args[2:end]]
 
-    if is_constant(lhs_eval) && is_constant(rhs_eval)
-        try
-            return evaluate_binary(op, lhs_eval, rhs_eval)
-        catch
-            return Expr(:call, op, lhs_eval, rhs_eval)
+        # If all operands are constants, evaluate the whole expression
+        if all(is_constant, operands)
+            try
+                # Fold left: ((x op y) op z) op ...
+                result = operands[1]
+                for operand in operands[2:end]
+                    result = evaluate_binary(op, result, operand)
+                end
+                return result
+            catch
+                return Expr(:call, op, operands...)
+            end
+        else
+            return Expr(:call, op, operands...)
         end
     else
-        return Expr(:call, op, lhs_eval, rhs_eval)
+        # Binary operation with exactly 2 operands
+        lhs = expr.args[2]
+        rhs = expr.args[3]
+
+        lhs_eval = partial_evaluate(lhs, unfolded_vars, env)
+        rhs_eval = partial_evaluate(rhs, unfolded_vars, env)
+
+        if is_constant(lhs_eval) && is_constant(rhs_eval)
+            try
+                return evaluate_binary(op, lhs_eval, rhs_eval)
+            catch
+                return Expr(:call, op, lhs_eval, rhs_eval)
+            end
+        else
+            return Expr(:call, op, lhs_eval, rhs_eval)
+        end
     end
 end
 
@@ -284,7 +308,35 @@ function ensure_block(expr)
     end
 end
 
-function partial_evaluate_and_make_entry(code; params::Vector{Symbol}=Symbol[])
+function find_last_expression(code::Expr)
+    """
+    Find the last meaningful expression in the code block.
+    Returns the expression itself if it's not an assignment,
+    or the assigned variable if it's an assignment.
+    """
+    if code.head != :block
+        return code
+    end
+
+    # Find the last non-LineNumberNode statement
+    for stmt in reverse(code.args)
+        if stmt isa LineNumberNode
+            continue
+        elseif stmt isa Expr && stmt.head == :block
+            # Recurse into nested blocks
+            return find_last_expression(stmt)
+        elseif stmt isa Expr && stmt.head == :(=) && stmt.args[1] isa Symbol
+            # Assignment: return the variable name
+            return stmt.args[1]
+        else
+            # Any other expression: return it as is
+            return stmt
+        end
+    end
+    return nothing
+end
+
+function partial_evaluate_and_make_entry(code; params::Vector{Symbol}=Symbol[], fname::Union{Nothing,Symbol}=nothing)
     env = Dict{Symbol,Any}()
     unfolded_vars = copy(params)
 
@@ -299,14 +351,40 @@ function partial_evaluate_and_make_entry(code; params::Vector{Symbol}=Symbol[])
     end
     unfolded_vars = filtered
 
+    # Find the last expression before partial evaluation
+    last_expr = find_last_expression(code)
+
     folded_ast = partial_evaluate(code, unfolded_vars, env)
     folded_block = ensure_block(folded_ast)
 
-    fname = fresh_func_name()
+    # Add explicit return statement for the last expression
+    if last_expr !== nothing
+        if last_expr isa Symbol
+            # It's a variable - return its value (folded or not)
+            return_val = get(env, last_expr, last_expr)
+        else
+            # It's an expression - evaluate it and append
+            return_val = partial_evaluate(last_expr, unfolded_vars, env)
+        end
+
+        # Only add return if it's not already there
+        # Remove the last expression if it's the same as what we want to return
+        if !isempty(folded_block.args)
+            last_stmt = folded_block.args[end]
+            # Check if the last statement is LineNumberNode
+            while !isempty(folded_block.args) && folded_block.args[end] isa LineNumberNode
+                pop!(folded_block.args)
+            end
+        end
+
+        push!(folded_block.args, return_val)
+    end
+
+    func_name = fname === nothing ? fresh_func_name() : fname
     func_expr = Expr(:block,
         Expr(:function,
-             Expr(:call, fname, unfolded_vars...),
+             Expr(:call, func_name, unfolded_vars...),
              folded_block))
 
-    return func_expr, fname
+    return func_expr, func_name
 end
