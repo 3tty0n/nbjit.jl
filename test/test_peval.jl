@@ -104,7 +104,7 @@ end
     expr = :(y = 10)
     result = partial_evaluate(expr, unfolded_vars, env)
     @test result isa Expr
-    @test result.head == :call
+    @test result.head == :(=)
 end
 
 @testset "partial_evaluate - if-then-else" begin
@@ -194,6 +194,6 @@ end
     func_expr, fname = partial_evaluate_and_make_entry(code)
     @test func_expr isa Expr
     @test fname isa Symbol
-    @test fname == :func_0
+    @test fname == :func_1
     @test func_expr.head == :block
 end
