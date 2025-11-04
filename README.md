@@ -43,6 +43,9 @@ end
 Try different thresholds without repeating preprocessing.
 
 ### Algorithm Development
+
+NOTE: Currently (05.11.2025) `@hole` supports only integer assignment (very restricted, sorry!).
+
 ```julia
 @jit begin
     setup = initialize_environment()
