@@ -1,21 +1,24 @@
-include("./split_jit.jl")
+include("./separate_dylib_compile.jl")
 
 """
     run_file(path; env=Dict{Symbol,Any}())
 
-Compile the code at `path` using the split JIT runtime and execute it against
-an optional environment dictionary. The resulting bindings from the execution
-are merged back into `env`, which is also returned to the caller.
+Compile the code at `path` using the separate dylib JIT runtime and execute it.
 """
 function run_file(path; env::Dict{Symbol,Any}=Dict{Symbol,Any}())
     source = read(path, String)
     code = Meta.parse(source)
-    compiled = split_and_compile(code)
-    println("Main function: $(compiled.main_fname) with inputs $(compiled.main_inputs)")
-    for (i, fname) in enumerate(compiled.hole_fnames)
-        println("Hole $i -> $(fname) with inputs $(compiled.hole_inputs[i])")
+    compiled = compile_to_separate_dylibs(code)
+
+    println("Main dylib: $(compiled.main_lib_path)")
+    println("Holes:")
+    for (i, name) in enumerate(compiled.hole_func_names)
+        println("  [$i] $(name) -> $(compiled.hole_lib_paths[i])")
     end
-    return compiled
+
+    result = execute_dylib(compiled)
+    cleanup_dylib!(compiled)
+    return result
 end
 
 function main(path)
