@@ -56,6 +56,19 @@ function codegen(cg::CodeGen, expr::Bool)
     return LLVM.ConstantInt(LLVM.Int1Type(), expr ? 1 : 0)
 end
 
+function ensure_int64(cg::CodeGen, val::LLVM.Value)
+    val_type = LLVM.value_type(val)
+    if val_type == LLVM.IntType(64)
+        return val
+    elseif val_type == LLVM.Int1Type()
+        return LLVM.zext!(cg.builder, val, LLVM.IntType(64), "bool_to_int64")
+    elseif val_type == LLVM.DoubleType()
+        return LLVM.fptosi!(cg.builder, val, LLVM.IntType(64), "float_to_int64")
+    else
+        error("Unsupported argument type $(val_type) for external call")
+    end
+end
+
 function codegen(cg::CodeGen, expr::Symbol)
     if expr == :nothing
         return
@@ -153,15 +166,26 @@ function codegen(cg::CodeGen, expr::Expr)
         return initval
     elseif expr.head == :call
         if expr.args[1] == :+
-            lhs = expr.args[2]
-            rhs = expr.args[3]
-            L = codegen(cg, lhs)
-            R = codegen(cg, rhs)
-            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
-                return LLVM.fadd!(cg.builder, L, R, "addtmp")
-            else
-                return LLVM.add!(cg.builder, L, R, "addtmp")
+            operands = expr.args[2:end]
+            @assert !isempty(operands) ":+ requires at least one operand"
+            acc = codegen(cg, operands[1])
+            for operand in operands[2:end]
+                next = codegen(cg, operand)
+                acc_type = LLVM.value_type(acc)
+                next_type = LLVM.value_type(next)
+                if acc_type == LLVM.DoubleType() || next_type == LLVM.DoubleType()
+                    if acc_type != LLVM.DoubleType()
+                        acc = LLVM.sitofp!(cg.builder, acc, LLVM.DoubleType(), "add_promote_lhs")
+                    end
+                    if next_type != LLVM.DoubleType()
+                        next = LLVM.sitofp!(cg.builder, next, LLVM.DoubleType(), "add_promote_rhs")
+                    end
+                    acc = LLVM.fadd!(cg.builder, acc, next, "addtmp")
+                else
+                    acc = LLVM.add!(cg.builder, acc, next, "addtmp")
+                end
             end
+            return acc
         elseif expr.args[1] == :-
             lhs = expr.args[2]
             rhs = expr.args[3]
@@ -297,20 +321,29 @@ function codegen(cg::CodeGen, expr::Expr)
         elseif expr.args[1] isa Symbol
             callee = expr.args[1]
             julia_args = expr.args[2:end]
-
-            if !haskey(LLVM.functions(cg.mod), string(callee))
-                error("encountered undeclared function $(callee)")
-            end
-            func =  LLVM.functions(cg.mod)[string(callee)]
-
-            if length(LLVM.parameters(func)) != length(julia_args)
-                error("number of parameters mismatch")
+            arg_vals = LLVM.Value[]
+            for v in julia_args
+                push!(arg_vals, codegen(cg, v))
             end
 
             args = LLVM.Value[]
-            for v in julia_args
-                push!(args, codegen(cg, v))
+            for val in arg_vals
+                push!(args, ensure_int64(cg, val))
             end
+
+            func_name = string(callee)
+            if !haskey(LLVM.functions(cg.mod), func_name)
+                arg_types = fill(LLVM.IntType(64), length(args))
+                func_type = LLVM.FunctionType(LLVM.IntType(64), arg_types)
+                func = LLVM.Function(cg.mod, func_name, func_type)
+                LLVM.linkage!(func, LLVM.API.LLVMExternalLinkage)
+            else
+                func = LLVM.functions(cg.mod)[func_name]
+                if length(LLVM.parameters(func)) != length(args)
+                    error("number of parameters mismatch for $(callee)")
+                end
+            end
+
             ft = LLVM.function_type(func)
             return LLVM.call!(cg.builder, ft, func, args, "calltmp")
         else
