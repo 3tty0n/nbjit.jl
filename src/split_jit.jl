@@ -150,70 +150,6 @@ function prepare_split(code)
 end
 
 """
-    split_and_compile(code::Expr) -> CompiledSplitCode
-
-Split the input code at `@hole` annotations, partially evaluate each block, and
-compile the resulting functions to LLVM modules. Returns a `CompiledSplitCode`
-object that can be reused or selectively updated.
-"""
-function split_and_compile(code)
-    main_ast, hole_blocks, guard_syms = prepare_split(code)
-
-    clean_main_block = strip_hole_markers(main_ast)
-    main_inputs = unique_symbols(reduce(vcat, guard_syms; init=Symbol[]))
-    main_func_expr, main_fname = partial_evaluate_and_make_entry(clean_main_block; params=main_inputs)
-    main_mod, main_ctx = compile_function(main_func_expr, main_fname)
-
-    hole_mods = Vector{Union{Nothing, LLVM.Module}}()
-    hole_ctxs = Vector{Union{Nothing, LLVM.Context}}()
-    hole_fnames = Symbol[]
-    hole_inputs = Vector{Vector{Symbol}}()
-    hole_func_exprs = Expr[]
-    hole_asts = Expr[]
-
-    for (i, hole_block) in enumerate(hole_blocks)
-        params = guard_syms[i]
-        hole_block_expr = isa(hole_block, Expr) ? hole_block : Expr(:block, hole_block)
-        hole_func_expr, hole_fname = partial_evaluate_and_make_entry(hole_block_expr; params=params)
-        push!(hole_func_exprs, hole_func_expr)
-        push!(hole_fnames, hole_fname)
-        push!(hole_inputs, params)
-        push!(hole_asts, deepcopy(hole_block_expr))
-
-        func_ast = extract_function_expr(hole_func_expr)
-        if func_ast === nothing
-            push!(hole_mods, nothing)
-            push!(hole_ctxs, nothing)
-        else
-            mod, ctx = compile_to_llvm(func_ast, hole_fname)
-            push!(hole_mods, mod)
-            push!(hole_ctxs, ctx)
-        end
-    end
-
-    compiled = CompiledSplitCode(
-        main_mod,
-        main_ctx,
-        main_fname,
-        main_inputs,
-        main_func_expr,
-        hole_mods,
-        hole_ctxs,
-        hole_fnames,
-        hole_inputs,
-        hole_func_exprs,
-        guard_syms,
-        Dict{Symbol, Any}(),
-        main_ast,
-        hole_asts
-    )
-
-    code_hash = compute_ast_hash(code)
-    LLVM_COMPILATION_CACHE[code_hash] = compiled
-    return compiled
-end
-
-"""
     check_guards(compiled, env) -> Bool
 
 Verify that guard symbols have not changed relative to the cached values.
@@ -237,40 +173,4 @@ function check_guards(compiled::CompiledSplitCode, env::Dict{Symbol, Any})
         end
     end
     return true
-end
-
-"""
-    recompile_hole!(compiled, hole_index, new_code)
-
-Recompile only the specified hole block. Guard symbols must remain unchanged.
-"""
-function recompile_hole!(compiled::CompiledSplitCode, hole_index::Int, new_code)
-    @assert 1 <= hole_index <= length(compiled.hole_mods) "Invalid hole index $hole_index"
-
-    new_block = new_code isa Expr && new_code.head == :block ? new_code : Expr(:block, new_code)
-    existing_guards = compiled.guard_syms[hole_index]
-
-    new_syms = SplitAst.collect_symbols(new_block)
-    if !all(sym -> sym in existing_guards, new_syms)
-        missing = [sym for sym in new_syms if !(sym in existing_guards)]
-        error("Guard symbols changed ($missing); full recompilation required.")
-    end
-
-    hole_func_expr, hole_fname = partial_evaluate_and_make_entry(new_block; params=existing_guards)
-    compiled.hole_func_exprs[hole_index] = hole_func_expr
-    compiled.hole_fnames[hole_index] = hole_fname
-    compiled.hole_asts[hole_index] = deepcopy(new_block)
-
-    func_ast = extract_function_expr(hole_func_expr)
-    if func_ast === nothing
-        compiled.hole_mods[hole_index] = nothing
-        compiled.hole_ctxs[hole_index] = nothing
-    else
-        mod, ctx = compile_to_llvm(func_ast, hole_fname)
-        compiled.hole_mods[hole_index] = mod
-        compiled.hole_ctxs[hole_index] = ctx
-    end
-
-    empty!(compiled.guard_values)
-    return compiled
 end
