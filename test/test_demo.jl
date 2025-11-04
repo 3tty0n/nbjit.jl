@@ -2,7 +2,7 @@ using Test
 
 include("../src/ijulia_integration.jl")
 
-@testset "Notebook Runtime Behavior (ex1.jl & demo)" begin
+@testset "Notebook Runtime Behavior" begin
 
     @testset "Basic single hole caching" begin
         session = IJuliaIntegration.NotebookSession()
@@ -265,7 +265,7 @@ include("../src/ijulia_integration.jl")
 
         # Execute same code with different cell_id (simulates re-execution)
         res2 = IJuliaIntegration.run_cell!(session, code; cell_id="cell_002")
-        @test res2.rebuilt_main == false  # Should reuse from content cache!
+        @test res2.rebuilt_main == false  # Should reuse via alias
         @test isempty(res2.recompiled_holes)
 
         # Execute same code with yet another cell_id
@@ -294,8 +294,8 @@ include("../src/ijulia_integration.jl")
         end
 
         res2 = IJuliaIntegration.run_cell!(session, code2; cell_id="cell_101")
-        @test res2.rebuilt_main == false  # Main should be cached via content!
-        @test res2.recompiled_holes == [1]  # Only hole recompiled
+        @test res2.rebuilt_main == false  # Reuse main, recompile hole
+        @test res2.recompiled_holes == [1]
     end
 
     @testset "Content-based caching: multiple holes across cells" begin
@@ -315,7 +315,7 @@ include("../src/ijulia_integration.jl")
 
         # Execute same code in different cell (simulates re-execution)
         res2 = IJuliaIntegration.run_cell!(session, code1; cell_id="multi_002")
-        @test res2.rebuilt_main == false  # Reuse via content cache
+        @test res2.rebuilt_main == false
         @test isempty(res2.recompiled_holes)
 
         # Change first hole in new cell
@@ -328,8 +328,8 @@ include("../src/ijulia_integration.jl")
         end
 
         res3 = IJuliaIntegration.run_cell!(session, code2; cell_id="multi_003")
-        @test res3.rebuilt_main == false  # Main cached via content
-        @test res3.recompiled_holes == [1]  # Only first hole
+        @test res3.rebuilt_main == false
+        @test res3.recompiled_holes == [1]  # Only first hole changed
     end
 end
 
