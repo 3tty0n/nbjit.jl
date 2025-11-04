@@ -215,24 +215,14 @@ function run_cell_dylib!(session::NotebookSession, code::Expr, cell_key::String)
                              "Holes: $(length(compiled.hole_lib_paths))"
                 return CellResult(cell_key, compiled, Int[], false, result, :dylib, dylib_info)
             else
-                compiled = clone_dylib_compiled(session.dylib_cells[similar_canonical])
-                recompiled_holes = Int[]
-                for (idx, new_hash) in enumerate(hole_hashes)
-                    needs_new = idx > length(base_hole_hashes) || new_hash != base_hole_hashes[idx]
-                    if needs_new
-                        recompile_single_hole!(compiled, idx, hole_blocks[idx], guard_syms[idx])
-                        push!(recompiled_holes, idx)
-                    end
-                end
-                if !isempty(recompiled_holes)
-                    refresh_main_link!(compiled)
-                end
-                compiled.main_hash = main_hash
-                compiled.hole_hashes = hole_hashes
-                compiled.guard_syms = guard_syms
+                compiled = session.dylib_cells[similar_canonical]
+                session.cell_aliases[cell_key] = similar_canonical
+                recompiled_holes, rebuilt_main = update_dylib!(compiled, code)
+                update_cache!(session, similar_canonical, compiled, main_hash, hole_hashes, guard_syms)
+                session.main_hashes[cell_key] = main_hash
+                session.hole_hashes[cell_key] = hole_hashes
+                session.guard_signatures[cell_key] = guard_syms
                 session.dylib_cells[cell_key] = compiled
-                rebuilt_main = false
-                update_cache!(session, cell_key, compiled, main_hash, hole_hashes, guard_syms)
             end
         else
             compiled = compile_to_separate_dylibs(code)

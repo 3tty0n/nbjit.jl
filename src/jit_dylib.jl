@@ -10,6 +10,7 @@ Architecture:
 
 using LLVM
 using Libdl
+using Random
 
 include("./jit_split.jl")
 
@@ -130,6 +131,19 @@ end
 """
 Compile an LLVM module to a shared library (.so/.dylib/.dll)
 """
+function sanitize_symbol_name(sym::Symbol)
+    name = String(sym)
+    sanitized = replace(name, r"[^A-Za-z0-9_]" => "_")
+    return isempty(sanitized) ? "anon" : sanitized
+end
+
+function generate_dylib_path(prefix::String, fname::Symbol)
+    lib_ext = Sys.iswindows() ? ".dll" : Sys.isapple() ? ".dylib" : ".so"
+    fname_part = sanitize_symbol_name(fname)
+    suffix = randstring(8)
+    return joinpath(tempdir(), "nbjit_$(prefix)_$(fname_part)_$(suffix)$(lib_ext)")
+end
+
 function compile_module_to_dylib(mod::LLVM.Module, fname::Symbol, prefix::String="lib")
     # Create target machine with PIC
     triple = Sys.MACHINE
@@ -141,13 +155,10 @@ function compile_module_to_dylib(mod::LLVM.Module, fname::Symbol, prefix::String
         optlevel=LLVM.API.LLVMCodeGenLevelDefault
     )
 
-    # Compile to object file
     obj_path = tempname() * ".o"
     LLVM.emit(tm, mod, LLVM.API.LLVMObjectFile, obj_path)
 
-    # Link to shared library
-    lib_ext = Sys.iswindows() ? ".dll" : Sys.isapple() ? ".dylib" : ".so"
-    lib_path = tempname() * "_$(prefix)_$(fname)$(lib_ext)"
+    lib_path = generate_dylib_path(prefix, fname)
 
     try
         if Sys.islinux()
@@ -437,7 +448,7 @@ function clone_dylib_compiled(base::DylibCompiledCode)
     new_main_path = nothing
     new_main_handle = C_NULL
     if base.main_lib_path !== nothing && isfile(base.main_lib_path)
-        new_main_path = tempname() * "_" * basename(base.main_lib_path)
+        new_main_path = generate_dylib_path("main", base.main_func_name)
         cp(base.main_lib_path, new_main_path; force=true)
         new_main_handle = Libdl.dlopen(new_main_path, Libdl.RTLD_NOW | Libdl.RTLD_GLOBAL)
     end
@@ -445,9 +456,10 @@ function clone_dylib_compiled(base::DylibCompiledCode)
     # Duplicate hole libraries
     new_hole_paths = String[]
     new_hole_handles = Ptr{Cvoid}[]
-    for path in base.hole_lib_paths
+    for (idx, path) in enumerate(base.hole_lib_paths)
         if !isempty(path) && isfile(path)
-            new_path = tempname() * "_" * basename(path)
+            fname = idx <= length(base.hole_func_names) ? base.hole_func_names[idx] : Symbol("hole$(idx)")
+            new_path = generate_dylib_path("hole$(idx)", fname)
             cp(path, new_path; force=true)
             handle = Libdl.dlopen(new_path, Libdl.RTLD_NOW | Libdl.RTLD_GLOBAL)
             push!(new_hole_paths, new_path)
