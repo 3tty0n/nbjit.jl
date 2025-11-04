@@ -1,10 +1,16 @@
-parse_annot(expr::LineNumberNode, unconstant_expr) = nothing
+function parse_annot(expr::LineNumberNode, unconstant_expr)
+    return nothing
+end
 
 function parse_annot(expr::Symbol, unconstant_expr)
     return expr
 end
 
 function parse_annot(expr::Number, unconstant_expr)
+    return expr
+end
+
+function parse_annot(expr::String, unconstant_expr)
     return expr
 end
 
@@ -24,10 +30,12 @@ function parse_annot(expr::Expr, unconstant_expr)
         args = expr.args
         annot = args[1]
         if annot isa Symbol && string(annot) == "@hole"
-            if args[2] isa Symbol
-                push!(unconstant_expr, args[2])
-            else
-                push!(unconstant_expr, args[2:end]...)
+            # args[1] = @hole, args[2] = LineNumberNode, args[3:end] = actual arguments
+            if length(args) >= 3
+                # Recursively parse the actual macro arguments
+                for i in 3:length(args)
+                    parse_annot(args[i], unconstant_expr)
+                end
             end
         end
     elseif expr.head == :hole
