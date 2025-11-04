@@ -8,16 +8,16 @@ println("=" ^ 70)
         include("test_peval.jl")
     end
 
-    @testset "Split JIT Compilation" begin
-        include("test_split_jit.jl")
-    end
-
-    @testset "JIT Features" begin
+    @testset "JIT Backend" begin
         include("test_jit.jl")
     end
 
-    @testset "Dylib JIT features" begin
+    @testset "Dylib JIT Backends" begin
         include("test_jit_dylib.jl")
+    end
+
+    @testset "JIT Compilation Runtime w/ AST Splitting" begin
+        include("test_jit_split.jl")
     end
 
     @testset "Notebook simulation" begin

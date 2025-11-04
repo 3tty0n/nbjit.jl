@@ -11,7 +11,7 @@ Architecture:
 using LLVM
 using Libdl
 
-include("./split_jit.jl")
+include("./jit_split.jl")
 
 """
 Tracks separately compiled libraries for main and holes
