@@ -1,6 +1,6 @@
 using Test
 
-include("../src/separate_dylib_compile.jl")
+include("../src/jit_dylib.jl")
 
 @testset "AST splitting utilities" begin
     code = quote

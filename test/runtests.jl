@@ -17,7 +17,7 @@ println("=" ^ 70)
     end
 
     @testset "Dylib JIT features" begin
-        include("test_dylib_compilation.jl")
+        include("test_jit_dylib.jl")
     end
 
     @testset "Notebook simulation" begin

@@ -1,4 +1,4 @@
-include("./separate_dylib_compile.jl")
+include("./jit_dylib.jl")
 
 """
     run_file(path; env=Dict{Symbol,Any}())
