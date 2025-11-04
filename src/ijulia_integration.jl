@@ -1,48 +1,113 @@
 module IJuliaIntegration
 
+using Libdl  # For dlopen, dlsym, dlclose
+
 include("./split_jit.jl")
+include("./separate_dylib_compile.jl")
 
 export NotebookSession, current_session, set_default_session!, run_cell!
-export @ijit, @jit, @cache, get_cell_id
+export @jit, @cache, get_cell_id
+export enable_dylib_mode!, disable_dylib_mode!
+
+"""
+Cached native code as shared library for direct execution (fastest trampoline)
+Uses dlopen to load compiled native code, avoiding recompilation entirely.
+"""
+mutable struct NativeCode
+    lib_handle::Ptr{Cvoid}  # dlopen handle to shared library
+    lib_path::String        # Path to shared library file
+    func_name::Symbol
+    func_ptr::Ptr{Cvoid}    # dlsym result - function pointer
+end
+
+"""
+Cached executable code with LLVM IR for trampoline-based reuse
+"""
+mutable struct ExecutableCode
+    llvm_ir::String  # Cached LLVM IR text
+    func_name::Symbol
+    ast::Expr  # Original AST for regeneration if needed
+end
 
 mutable struct NotebookSession
-    cells::Dict{String, CompiledSplitCode}
+    dylib_cells::Dict{String, DylibCompiledCode}
     main_hashes::Dict{String, UInt64}
     hole_hashes::Dict{String, Vector{UInt64}}
     guard_signatures::Dict{String, Vector{Vector{Symbol}}}
     pure_cache::Dict{String, UInt64}  # For cells without holes
     execution_counts::Dict{String, Int}  # Track execution count per cell
-    guard_env::Dict{String, Dict{Symbol, Any}}  # Track guard variable values
     # Content-based lookup: (main_hash, guard_sig) -> cell_id
     content_index::Dict{Tuple{UInt64, Vector{Vector{Symbol}}}, String}
+    cell_aliases::Dict{String, String}  # Track cell lineage/aliases
 end
 
 NotebookSession() = NotebookSession(
-    Dict{String, CompiledSplitCode}(),
+    Dict{String, DylibCompiledCode}(),
     Dict{String, UInt64}(),
     Dict{String, Vector{UInt64}}(),
     Dict{String, Vector{Vector{Symbol}}}(),
     Dict{String, UInt64}(),
     Dict{String, Int}(),
-    Dict{String, Dict{Symbol, Any}}(),
-    Dict{Tuple{UInt64, Vector{Vector{Symbol}}}, String}()
+    Dict{Tuple{UInt64, Vector{Vector{Symbol}}}, String}(),
+    Dict{String, String}()
 )
 
 const DEFAULT_SESSION = Ref{NotebookSession}(NotebookSession())
 
+function resolve_alias!(session::NotebookSession, cell_id::String)
+    path = String[]
+    current = cell_id
+    while haskey(session.cell_aliases, current)
+        push!(path, current)
+        current = session.cell_aliases[current]
+    end
+    for alias in path
+        session.cell_aliases[alias] = current
+    end
+    return current
+end
+
+clear_alias!(session::NotebookSession, cell_id::String) = delete!(session.cell_aliases, cell_id)
+
+"""
+    Result of IJulia kernel
+"""
 struct CellResult
     cell_id::String
-    compiled::CompiledSplitCode
+    compiled::DylibCompiledCode
     recompiled_holes::Vector{Int}
     rebuilt_main::Bool
+    result::Union{Nothing, Int64}  # Execution result
+    exec_tier::Symbol  # Execution tier: :native, :ir, :recompiled, :full, or :dylib
+    dylib_info::Union{Nothing, String}  # Info about dylib compilation
 end
 
 function Base.show(io::IO, res::CellResult)
     rebuilt = res.rebuilt_main ? "recompiled" : "cached"
-    println(io, "Cell $(res.cell_id): main $(res.compiled.main_fname) ($rebuilt)")
-    for (i, fname) in enumerate(res.compiled.hole_fnames)
+
+    # Show execution tier
+    tier_str = if res.exec_tier == :native
+        "Native trampoline"
+    elseif res.exec_tier == :ir
+        "IR trampoline"
+    elseif res.exec_tier == :recompiled
+        "Recompiled (main cached)"
+    elseif res.exec_tier == :dylib
+        "Dylib (separate compilation)"
+    else
+        "Full compile"
+    end
+
+    println(io, "Cell $(res.cell_id): main $(res.compiled.main_func_name) ($rebuilt) [$tier_str]")
+    if res.dylib_info !== nothing
+        println(io, "  $(res.dylib_info)")
+    end
+    for (i, fname) in enumerate(res.compiled.hole_func_names)
         status = i in res.recompiled_holes ? "recompiled" : "cached"
         println(io, "  hole $i -> $(fname) ($status)")
+    end
+    if res.result !== nothing
+        println(io, "  result: $(res.result)")
     end
 end
 
@@ -57,11 +122,11 @@ function set_default_session!(session::NotebookSession)
 end
 
 function update_cache!(session::NotebookSession, cell_id::String,
-                       compiled::CompiledSplitCode,
+                       compiled::DylibCompiledCode,
                        main_hash::UInt64,
                        hole_hashes::Vector{UInt64},
                        guard_syms::Vector{Vector{Symbol}})
-    session.cells[cell_id] = compiled
+    session.dylib_cells[cell_id] = compiled
     session.main_hashes[cell_id] = main_hash
     session.hole_hashes[cell_id] = hole_hashes
     session.guard_signatures[cell_id] = guard_syms
@@ -81,89 +146,110 @@ a notebook cell creates a new cell ID), we reuse the cached compilation.
 """
 function run_cell!(session::NotebookSession, code::Expr; cell_id::AbstractString)
     cell_key = String(cell_id)
+    return run_cell_dylib!(session, code, cell_key)
+end
 
-    # Increment execution count
+"""
+    run_cell_dylib!(session, code, cell_key) -> CellResult
+
+Execute cell using separate dylib compilation mode.
+Main and holes are compiled to separate .so/.dylib files.
+"""
+function run_cell_dylib!(session::NotebookSession, code::Expr, cell_key::String)
     exec_count = get(session.execution_counts, cell_key, 0) + 1
     session.execution_counts[cell_key] = exec_count
 
     main_ast, hole_blocks, guard_syms = prepare_split(code)
     main_hash = compute_ast_hash(main_ast)
     hole_hashes = [compute_ast_hash(block) for block in hole_blocks]
-
-    rebuilt_main = false
-    recompiled_holes = Int[]
-    compiled = nothing
-
-    # Content-based lookup: check if we've seen this exact structure before
     content_key = (main_hash, guard_syms)
-    similar_cell_id = get(session.content_index, content_key, nothing)
 
-    # Check if current cell has cached data
-    has_cell_cache = haskey(session.cells, cell_key)
-
-    # Try to reuse from similar cell if current cell has no cache
-    if !has_cell_cache && similar_cell_id !== nothing && haskey(session.cells, similar_cell_id)
-        # Found similar cell with same main structure and guards
-        compiled = session.cells[similar_cell_id]
-        old_hole_hashes = session.hole_hashes[similar_cell_id]
-
-        # Fast path: only recompile changed holes
-        recompiled = Int[]
-        for (idx, hhash) in enumerate(hole_hashes)
-            if idx <= length(old_hole_hashes) && hhash != old_hole_hashes[idx]
-                recompile_hole!(compiled, idx, hole_blocks[idx])
-                push!(recompiled, idx)
-            elseif idx > length(old_hole_hashes)
-                # New hole added
-                compiled = split_and_compile(code)
-                rebuilt_main = true
-                recompiled_holes = collect(1:length(hole_blocks))
-                @goto update_cache
-            end
-        end
-        recompiled_holes = recompiled
-        rebuilt_main = false
-    # Use existing cache for this cell
-    elseif has_cell_cache
-        compiled = session.cells[cell_key]
-        old_main_hash = session.main_hashes[cell_key]
-        old_hole_hashes = session.hole_hashes[cell_key]
-        old_guards = session.guard_signatures[cell_key]
-
-        # Check if guard symbols changed or main block structure changed
-        if main_hash != old_main_hash ||
-           length(hole_hashes) != length(old_hole_hashes) ||
-           guard_syms != old_guards
-            # Slow path: full recompilation needed
-            compiled = split_and_compile(code)
-            rebuilt_main = true
-            recompiled_holes = collect(1:length(hole_blocks))
+    # Resolve to canonical cell if this ID is an alias
+    canonical_key = resolve_alias!(session, cell_key)
+    if canonical_key != cell_key
+        stored_main = get(session.main_hashes, canonical_key, UInt64(0))
+        stored_holes = get(session.hole_hashes, canonical_key, Vector{UInt64}())
+        stored_guards = get(session.guard_signatures, canonical_key, Vector{Vector{Symbol}}())
+        if main_hash == stored_main && hole_hashes == stored_holes && guard_syms == stored_guards
+            compiled = session.dylib_cells[canonical_key]
+            session.cell_aliases[cell_key] = canonical_key
+            session.main_hashes[cell_key] = main_hash
+            session.hole_hashes[cell_key] = hole_hashes
+            session.guard_signatures[cell_key] = guard_syms
+            session.content_index[content_key] = canonical_key
+            result = execute_dylib(compiled)
+            dylib_info = "Main: $(basename(compiled.main_lib_path)), " *
+                         "Holes: $(length(compiled.hole_lib_paths))"
+            return CellResult(cell_key, compiled, Int[], false, result, :dylib, dylib_info)
         else
-            # Fast path: only recompile changed holes
-            recompiled = Int[]
-            for (idx, hhash) in enumerate(hole_hashes)
-                if hhash != old_hole_hashes[idx]
-                    recompile_hole!(compiled, idx, hole_blocks[idx])
-                    push!(recompiled, idx)
-                end
-            end
-            recompiled_holes = recompiled
+            clear_alias!(session, cell_key)
+            canonical_key = cell_key
         end
-    # First time seeing this code structure
-    else
-        compiled = split_and_compile(code)
-        rebuilt_main = true
-        recompiled_holes = collect(1:length(hole_blocks))
     end
 
-    @label update_cache
-    compiled isa CompiledSplitCode || error("Unexpected compilation state")
-    update_cache!(session, cell_key, compiled, main_hash, hole_hashes, guard_syms)
+    compiled = nothing
+    rebuilt_main = false
+    recompiled_holes = Int[]
 
-    # Update content index to point to this cell
-    session.content_index[content_key] = cell_key
+    if haskey(session.dylib_cells, cell_key)
+        compiled = session.dylib_cells[cell_key]
+        recompiled_holes, rebuilt_main = update_dylib!(compiled, code)
+        update_cache!(session, cell_key, compiled, main_hash, hole_hashes, guard_syms)
+    else
+        similar_cell_id = get(session.content_index, content_key, nothing)
+        if similar_cell_id !== nothing && haskey(session.dylib_cells, similar_cell_id)
+            similar_canonical = resolve_alias!(session, similar_cell_id)
+            base_main_hash = session.main_hashes[similar_canonical]
+            base_hole_hashes = session.hole_hashes[similar_canonical]
+            base_guards = session.guard_signatures[similar_canonical]
 
-    return CellResult(cell_key, compiled, recompiled_holes, rebuilt_main)
+            if main_hash == base_main_hash && hole_hashes == base_hole_hashes && guard_syms == base_guards
+                compiled = session.dylib_cells[similar_canonical]
+                session.cell_aliases[cell_key] = similar_canonical
+                session.main_hashes[cell_key] = main_hash
+                session.hole_hashes[cell_key] = hole_hashes
+                session.guard_signatures[cell_key] = guard_syms
+                session.content_index[content_key] = similar_canonical
+                result = execute_dylib(compiled)
+                dylib_info = "Main: $(basename(compiled.main_lib_path)), " *
+                             "Holes: $(length(compiled.hole_lib_paths))"
+                return CellResult(cell_key, compiled, Int[], false, result, :dylib, dylib_info)
+            else
+                compiled = clone_dylib_compiled(session.dylib_cells[similar_canonical])
+                recompiled_holes = Int[]
+                for (idx, new_hash) in enumerate(hole_hashes)
+                    needs_new = idx > length(base_hole_hashes) || new_hash != base_hole_hashes[idx]
+                    if needs_new
+                        recompile_single_hole!(compiled, idx, hole_blocks[idx], guard_syms[idx])
+                        push!(recompiled_holes, idx)
+                    end
+                end
+                if !isempty(recompiled_holes)
+                    refresh_main_link!(compiled)
+                end
+                compiled.main_hash = main_hash
+                compiled.hole_hashes = hole_hashes
+                compiled.guard_syms = guard_syms
+                session.dylib_cells[cell_key] = compiled
+                rebuilt_main = false
+                update_cache!(session, cell_key, compiled, main_hash, hole_hashes, guard_syms)
+            end
+        else
+            compiled = compile_to_separate_dylibs(code)
+            session.dylib_cells[cell_key] = compiled
+            recompiled_holes = collect(1:length(hole_blocks))
+            rebuilt_main = true
+            update_cache!(session, cell_key, compiled, main_hash, hole_hashes, guard_syms)
+        end
+    end
+
+    session.content_index[content_key] = resolve_alias!(session, cell_key)
+
+    result = execute_dylib(compiled)
+    dylib_info = "Main: $(basename(compiled.main_lib_path)), " *
+                 "Holes: $(length(compiled.hole_lib_paths))"
+
+    return CellResult(cell_key, compiled, recompiled_holes, rebuilt_main, result, :dylib, dylib_info)
 end
 
 """
@@ -222,7 +308,6 @@ end
 Simple caching macro for cells WITHOUT @hole markers. Caches based on code hash.
 If the code hasn't changed, displays "(cached)" and skips re-evaluation.
 
-# Example
 ```julia
 @cache begin
     data = expensive_load()
