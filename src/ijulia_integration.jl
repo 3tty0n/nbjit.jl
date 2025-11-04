@@ -189,19 +189,6 @@ function get_cell_id()
     return "cell_$(time_ns())"
 end
 
-macro ijit(cell_id, code)
-    id_string = cell_id isa Symbol ? string(cell_id) :
-                cell_id isa String ? cell_id :
-                throw(ArgumentError("@ijit expects a Symbol or String cell identifier"))
-    return quote
-        local _session = IJuliaIntegration.current_session()
-        local _code = $(Expr(:quote, code))
-        local _result = IJuliaIntegration.run_cell!(_session, _code; cell_id=$id_string)
-        display(_result)
-        _result
-    end
-end
-
 """
     @jit code
 
