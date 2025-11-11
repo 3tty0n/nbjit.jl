@@ -359,25 +359,28 @@ function partial_evaluate_and_make_entry(code; params::Vector{Symbol}=Symbol[], 
 
     # Add explicit return statement for the last expression
     if last_expr !== nothing
+        # Remove trailing LineNumberNodes
+        while !isempty(folded_block.args) && folded_block.args[end] isa LineNumberNode
+            pop!(folded_block.args)
+        end
+
         if last_expr isa Symbol
-            # It's a variable - return its value (folded or not)
-            return_val = get(env, last_expr, last_expr)
-        else
-            # It's an expression - evaluate it and append
-            return_val = partial_evaluate(last_expr, unfolded_vars, env)
-        end
-
-        # Only add return if it's not already there
-        # Remove the last expression if it's the same as what we want to return
-        if !isempty(folded_block.args)
-            last_stmt = folded_block.args[end]
-            # Check if the last statement is LineNumberNode
-            while !isempty(folded_block.args) && folded_block.args[end] isa LineNumberNode
-                pop!(folded_block.args)
+            # It's a variable - we need to return it
+            # If the symbol is in unfolded_vars, return the symbol itself (don't get from env
+            # because env contains the RHS expression which would cause double evaluation)
+            # If the symbol is not in unfolded_vars, return the folded value from env
+            if last_expr in unfolded_vars
+                return_val = last_expr
+            else
+                return_val = get(env, last_expr, last_expr)
             end
+            push!(folded_block.args, return_val)
+        else
+            # It's an expression - it's already been evaluated as part of folded_block
+            # The last statement in folded_block is the evaluated version
+            # We don't need to re-evaluate it, just ensure it's there as the return value
+            # (it's already at the end of folded_block from the partial evaluation)
         end
-
-        push!(folded_block.args, return_val)
     end
 
     func_name = fname === nothing ? fresh_func_name() : fname
