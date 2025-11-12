@@ -44,7 +44,7 @@ Try different thresholds without repeating preprocessing.
 
 ### Algorithm Development
 
-NOTE: Currently (05.11.2025) `@hole` supports only integer assignment (very restricted, sorry!).
+**Dictionary Support**: ✅ **NOW FULLY SUPPORTED!** You can use dictionaries directly in `@hole` blocks:
 
 ```julia
 @jit begin
@@ -58,6 +58,14 @@ NOTE: Currently (05.11.2025) `@hole` supports only integer assignment (very rest
     result = run_algorithm(setup, algorithm_params)
 end
 ```
+
+## Execution Flow
+
+1. **Load runtime:** `include("src/ijulia_integration.jl")` (optionally `set_default_session!`).
+2. **First run:** `@jit` parses the cell, splits out `@hole`s, generates LLVM IR, builds main/hole dylibs, executes them, and records hashes/guards (`exec_tier == :full`).
+3. **Edit only a hole:** guard/main hashes match, so the runtime recompiles just the affected hole dylib, keeps the main dylib cached, and reports the hole indices (`exec_tier == :dylib`).
+4. **Change structure/guards:** any mismatch triggers a full rebuild of the main dylib and updated guard signatures; caches refresh automatically.
+5. **Pure cells:** `@cache` memoises hole-free cells by AST hash and skips execution once the code is unchanged.
 
 ## Development
 
