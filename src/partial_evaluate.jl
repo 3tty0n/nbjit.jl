@@ -113,7 +113,11 @@ function partial_evaluate(expr, unfolded_vars, env)
         return expr
     end
 
-    if is_constant(expr) || expr isa QuoteNode
+    if expr isa QuoteNode
+        return expr
+    end
+
+    if is_constant(expr)
         return expr
     end
 
@@ -154,10 +158,30 @@ function partial_evaluate(expr, unfolded_vars, env)
                    Expr(:||, lhs, rhs)
         end
     elseif head == :(=) || head in (:+=, :-=, :*=, :/=, :^=, :%=)
-        lhs_sym = expr.args[1]
+        lhs = expr.args[1]
         rhs_val = partial_evaluate(expr.args[2], unfolded_vars, env)
         op_head = head
 
+        # Handle dictionary/array indexing assignment (e.g., dict[:key] = value)
+        if lhs isa Expr && lhs.head == :ref
+            # dict[:key] = value becomes setindex!(dict, value, :key)
+            dict_expr = partial_evaluate(lhs.args[1], unfolded_vars, env)
+            indices = [partial_evaluate(idx, unfolded_vars, env) for idx in lhs.args[2:end]]
+
+            # If it's a regular assignment, just propagate it
+            if op_head == :(=)
+                return Expr(:call, :setindex!, dict_expr, rhs_val, indices...)
+            else
+                # For +=, -=, etc., we need to read first, then write
+                base_op = Symbol(String(op_head)[1:end-1])
+                old_val = Expr(:ref, dict_expr, indices...)
+                new_val = Expr(:call, base_op, old_val, rhs_val)
+                return Expr(:call, :setindex!, dict_expr, new_val, indices...)
+            end
+        end
+
+        # Regular variable assignment
+        lhs_sym = lhs
         if op_head == :(=)
             env[lhs_sym] = rhs_val
         else
@@ -172,6 +196,11 @@ function partial_evaluate(expr, unfolded_vars, env)
             return expr.head == :tuple ? tuple(elems...) : collect(elems)
         end
         return Expr(expr.head, elems...)
+    elseif expr.head == :ref
+        # Handle dictionary/array indexing (e.g., dict[:key])
+        container = partial_evaluate(expr.args[1], unfolded_vars, env)
+        indices = [partial_evaluate(idx, unfolded_vars, env) for idx in expr.args[2:end]]
+        return Expr(:ref, container, indices...)
     elseif expr.head == :call
         args = expr.args
 

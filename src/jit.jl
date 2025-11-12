@@ -2,6 +2,7 @@ using LLVM
 using LLVM.Interop
 
 include("./jit_scope.jl")
+include("./jit_runtime.jl")
 
 FUNC_TBL = Dict()
 
@@ -25,6 +26,7 @@ mutable struct CodeGen
     mod::LLVM.Module
     type_env::Dict{String, LLVM.LLVMType}  # Track variable types
     string_cache::Dict{String, LLVM.Value}  # Cache for string constants
+    object_vars::Set{String}  # Track which variables are Julia objects (not primitives)
 
     CodeGen() =
         new(
@@ -32,8 +34,47 @@ mutable struct CodeGen
             CurrentScope(),
             LLVM.Module("nbjit"),
             Dict{String, LLVM.LLVMType}(),
-            Dict{String, LLVM.Value}()
+            Dict{String, LLVM.Value}(),
+            Set{String}()
         )
+end
+
+# Helper: Get LLVM type for Julia object pointers (opaque i8*)
+julia_object_type() = LLVM.PointerType(LLVM.Int8Type())
+
+"""
+Infer parameter types from function body by looking at assignments.
+Returns a Dict{Symbol, Symbol} mapping parameter name to type (:primitive or :object)
+"""
+function infer_parameter_types(func_body::Expr, param_names::Vector{Symbol})::Dict{Symbol, Symbol}
+    types = Dict{Symbol, Symbol}()
+
+    # Default: all parameters are primitives (Int64)
+    for param in param_names
+        types[param] = :primitive
+    end
+
+    # Scan the function body for assignments to parameters
+    function scan_expr(e)
+        if e isa Expr
+            if e.head == :(=) && e.args[1] in param_names
+                var = e.args[1]
+                rhs = e.args[2]
+
+                # Check if RHS is a Dict construction
+                if rhs isa Expr && rhs.head == :call && rhs.args[1] == :Dict
+                    types[var] = :object
+                end
+            elseif e.head == :block
+                for arg in e.args
+                    scan_expr(arg)
+                end
+            end
+        end
+    end
+
+    scan_expr(func_body)
+    return types
 end
 
 current_scope(cg::CodeGen) = cg.current_scope
@@ -56,6 +97,22 @@ function codegen(cg::CodeGen, expr::Bool)
     return LLVM.ConstantInt(LLVM.Int1Type(), expr ? 1 : 0)
 end
 
+function codegen(cg::CodeGen, expr::QuoteNode)
+    # Convert QuoteNode to Symbol using runtime helper
+    # Get the symbol name as a string
+    sym_name = String(expr.value)
+
+    # Create C string for the symbol name
+    str_ptr = codegen(cg, sym_name)
+
+    # Call runtime helper to create Symbol
+    symbol_func = declare_symbol_from_cstr(cg)
+    ft = LLVM.function_type(symbol_func)
+    sym_ptr = LLVM.call!(cg.builder, ft, symbol_func, [str_ptr], "symbol")
+
+    return sym_ptr
+end
+
 function ensure_int64(cg::CodeGen, val::LLVM.Value)
     val_type = LLVM.value_type(val)
     if val_type == LLVM.IntType(64)
@@ -64,8 +121,35 @@ function ensure_int64(cg::CodeGen, val::LLVM.Value)
         return LLVM.zext!(cg.builder, val, LLVM.IntType(64), "bool_to_int64")
     elseif val_type == LLVM.DoubleType()
         return LLVM.fptosi!(cg.builder, val, LLVM.IntType(64), "float_to_int64")
+    elseif val_type == julia_object_type()
+        # Unbox Julia object to Int64
+        unbox_func = declare_unbox_int64(cg)
+        ft = LLVM.function_type(unbox_func)
+        return LLVM.call!(cg.builder, ft, unbox_func, [val], "unboxed")
     else
         error("Unsupported argument type $(val_type) for external call")
+    end
+end
+
+"""
+Ensure value is a primitive type (Int64 or Double), unboxing if needed.
+Returns (value, :int64 or :double)
+"""
+function ensure_primitive(cg::CodeGen, val::LLVM.Value)
+    val_type = LLVM.value_type(val)
+    if val_type == LLVM.IntType(64)
+        return (val, :int64)
+    elseif val_type == LLVM.DoubleType()
+        return (val, :double)
+    elseif val_type == LLVM.Int1Type()
+        return (LLVM.zext!(cg.builder, val, LLVM.IntType(64), "bool_to_int64"), :int64)
+    elseif val_type == julia_object_type()
+        # Try to unbox to Int64 (we can add Float64 support later)
+        unbox_func = declare_unbox_int64(cg)
+        ft = LLVM.function_type(unbox_func)
+        return (LLVM.call!(cg.builder, ft, unbox_func, [val], "unboxed"), :int64)
+    else
+        error("Cannot use $(val_type) in arithmetic operation")
     end
 end
 
@@ -136,6 +220,61 @@ function get_or_declare_printf(cg::CodeGen)
     return printf_func
 end
 
+# Declare runtime helper functions for Dict operations
+function get_or_declare_runtime_function(cg::CodeGen, name::String, ret_type::LLVM.LLVMType, arg_types::Vector{LLVM.LLVMType})
+    if haskey(LLVM.functions(cg.mod), name)
+        return LLVM.functions(cg.mod)[name]
+    end
+
+    func_type = LLVM.FunctionType(ret_type, arg_types)
+    func = LLVM.Function(cg.mod, name, func_type)
+    LLVM.linkage!(func, LLVM.API.LLVMExternalLinkage)
+
+    return func
+end
+
+# Specific runtime function declarations
+function declare_dict_new(cg::CodeGen)
+    obj_ptr = julia_object_type()
+    return get_or_declare_runtime_function(cg, "nbjit_dict_new", obj_ptr, LLVM.LLVMType[])
+end
+
+function declare_dict_getindex(cg::CodeGen)
+    obj_ptr = julia_object_type()
+    return get_or_declare_runtime_function(cg, "nbjit_dict_getindex", obj_ptr, LLVM.LLVMType[obj_ptr, obj_ptr])
+end
+
+function declare_dict_setindex(cg::CodeGen)
+    obj_ptr = julia_object_type()
+    return get_or_declare_runtime_function(cg, "nbjit_dict_setindex!", LLVM.VoidType(), LLVM.LLVMType[obj_ptr, obj_ptr, obj_ptr])
+end
+
+function declare_symbol_from_cstr(cg::CodeGen)
+    obj_ptr = julia_object_type()
+    i8_ptr = LLVM.PointerType(LLVM.Int8Type())
+    return get_or_declare_runtime_function(cg, "nbjit_symbol_from_cstr", obj_ptr, LLVM.LLVMType[i8_ptr])
+end
+
+function declare_box_int64(cg::CodeGen)
+    obj_ptr = julia_object_type()
+    return get_or_declare_runtime_function(cg, "nbjit_box_int64", obj_ptr, LLVM.LLVMType[LLVM.Int64Type()])
+end
+
+function declare_box_float64(cg::CodeGen)
+    obj_ptr = julia_object_type()
+    return get_or_declare_runtime_function(cg, "nbjit_box_float64", obj_ptr, LLVM.LLVMType[LLVM.DoubleType()])
+end
+
+function declare_unbox_int64(cg::CodeGen)
+    obj_ptr = julia_object_type()
+    return get_or_declare_runtime_function(cg, "nbjit_unbox_int64", LLVM.Int64Type(), LLVM.LLVMType[obj_ptr])
+end
+
+function declare_unbox_float64(cg::CodeGen)
+    obj_ptr = julia_object_type()
+    return get_or_declare_runtime_function(cg, "nbjit_unbox_float64", LLVM.DoubleType(), LLVM.LLVMType[obj_ptr])
+end
+
 function codegen(cg::CodeGen, expr::Expr)
     if expr.head == :(=) && isa(expr.args[1], Symbol)
         local initval
@@ -199,9 +338,17 @@ function codegen(cg::CodeGen, expr::Expr)
         elseif expr.args[1] == :*
             lhs = expr.args[2]
             rhs = expr.args[3]
-            L = codegen(cg, lhs)
-            R = codegen(cg, rhs)
-            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+            L_raw = codegen(cg, lhs)
+            R_raw = codegen(cg, rhs)
+            L, L_type = ensure_primitive(cg, L_raw)
+            R, R_type = ensure_primitive(cg, R_raw)
+            if L_type == :double || R_type == :double
+                if L_type != :double
+                    L = LLVM.sitofp!(cg.builder, L, LLVM.DoubleType(), "mult_promote_lhs")
+                end
+                if R_type != :double
+                    R = LLVM.sitofp!(cg.builder, R, LLVM.DoubleType(), "mult_promote_rhs")
+                end
                 return LLVM.fmul!(cg.builder, L, R, "multmp")
             else
                 return LLVM.mul!(cg.builder, L, R, "multmp")
@@ -318,6 +465,63 @@ function codegen(cg::CodeGen, expr::Expr)
                 end
             end
             return LLVM.ConstantInt(LLVM.Int64Type(), 0)
+        elseif expr.args[1] == :Dict
+            # Dict construction: Dict(:key1 => val1, :key2 => val2, ...)
+            # For now, support only empty Dict or Pair syntax
+            dict_func = declare_dict_new(cg)
+            ft = LLVM.function_type(dict_func)
+            dict_ptr = LLVM.call!(cg.builder, ft, dict_func, LLVM.Value[], "dict")
+
+            # If there are => pairs, add them
+            for arg in expr.args[2:end]
+                if arg isa Expr && arg.head == :call && arg.args[1] == :(=>)
+                    key = codegen(cg, arg.args[2])
+                    value = codegen(cg, arg.args[3])
+
+                    # Box value if it's a primitive
+                    value_type = LLVM.value_type(value)
+                    if value_type == LLVM.Int64Type()
+                        box_func = declare_box_int64(cg)
+                        box_ft = LLVM.function_type(box_func)
+                        value = LLVM.call!(cg.builder, box_ft, box_func, [value], "boxed")
+                    elseif value_type == LLVM.DoubleType()
+                        box_func = declare_box_float64(cg)
+                        box_ft = LLVM.function_type(box_func)
+                        value = LLVM.call!(cg.builder, box_ft, box_func, [value], "boxed")
+                    end
+
+                    # Call setindex!
+                    setindex_func = declare_dict_setindex(cg)
+                    setindex_ft = LLVM.function_type(setindex_func)
+                    LLVM.call!(cg.builder, setindex_ft, setindex_func, [dict_ptr, value, key])
+                end
+            end
+
+            return dict_ptr
+        elseif expr.args[1] == :setindex!
+            # setindex!(dict, value, key)
+            dict_ptr = codegen(cg, expr.args[2])
+            value = codegen(cg, expr.args[3])
+            key = codegen(cg, expr.args[4])
+
+            # Box value if it's a primitive
+            value_type = LLVM.value_type(value)
+            if value_type == LLVM.Int64Type()
+                box_func = declare_box_int64(cg)
+                box_ft = LLVM.function_type(box_func)
+                value = LLVM.call!(cg.builder, box_ft, box_func, [value], "boxed")
+            elseif value_type == LLVM.DoubleType()
+                box_func = declare_box_float64(cg)
+                box_ft = LLVM.function_type(box_func)
+                value = LLVM.call!(cg.builder, box_ft, box_func, [value], "boxed")
+            end
+
+            setindex_func = declare_dict_setindex(cg)
+            ft = LLVM.function_type(setindex_func)
+            LLVM.call!(cg.builder, ft, setindex_func, [dict_ptr, value, key])
+
+            # setindex! returns nothing, but we return the dict_ptr for convenience
+            return dict_ptr
         elseif expr.args[1] isa Symbol
             callee = expr.args[1]
             julia_args = expr.args[2:end]
@@ -352,7 +556,34 @@ function codegen(cg::CodeGen, expr::Expr)
     elseif expr.head == :function
         signature = expr.args[1]
         func_name = string(signature.args[1])
-        args = [LLVM.IntType(64) for _ in signature.args[2:end]]
+
+        # Extract parameter symbols (filter out non-Symbol elements like type annotations)
+        param_symbols = Symbol[]
+        for i in 2:length(signature.args)
+            arg = signature.args[i]
+            if arg isa Symbol
+                push!(param_symbols, arg)
+            elseif arg isa Expr && arg.head == :(::)
+                # Handle type annotations: x::Int64 -> extract x
+                push!(param_symbols, arg.args[1])
+            end
+        end
+
+        # Infer parameter types from function body
+        param_types = infer_parameter_types(expr.args[2], param_symbols)
+
+        # Create LLVM function with inferred types
+        args = LLVM.LLVMType[]
+        for param_sym in param_symbols
+            if param_types[param_sym] == :object
+                push!(args, julia_object_type())
+                push!(cg.object_vars, string(param_sym))
+            else
+                push!(args, LLVM.IntType(64))
+            end
+        end
+
+        # For now, return type is always Int64 (we can enhance this later)
         func_type = LLVM.FunctionType(LLVM.IntType(64), args)
         func = LLVM.Function(cg.mod, func_name, func_type)
         LLVM.linkage!(func, LLVM.API.LLVMExternalLinkage)
@@ -445,6 +676,19 @@ function codegen(cg::CodeGen, expr::Expr)
         phi = LLVM.phi!(cg.builder, LLVM.Int1Type(), "or_result")
         append!(LLVM.incoming(phi), [(one, lhs_pos), (rhs, rhs_pos)])
         return phi
+    elseif expr.head == :ref
+        # Dictionary/array indexing: dict[:key]
+        container = codegen(cg, expr.args[1])
+        index = codegen(cg, expr.args[2])
+
+        # Call getindex runtime function
+        getindex_func = declare_dict_getindex(cg)
+        ft = LLVM.function_type(getindex_func)
+        value_ptr = LLVM.call!(cg.builder, ft, getindex_func, [container, index], "getindex")
+
+        # For now, return the object pointer
+        # If we need to unbox to int64, caller should handle it
+        return value_ptr
     elseif expr.head == :if
         func = LLVM.parent(LLVM.position(cg.builder))
         then_block = LLVM.BasicBlock(func, "then")
