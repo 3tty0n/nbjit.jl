@@ -15,6 +15,7 @@ using Random
 include("./jit_split.jl")
 include("./jit.jl")
 include("./partial_evaluate.jl")
+include("./runtime_library.jl")
 
 """
 Tracks separately compiled libraries for main and holes
