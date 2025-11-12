@@ -13,6 +13,8 @@ using Libdl
 using Random
 
 include("./jit_split.jl")
+include("./jit.jl")
+include("./partial_evaluate.jl")
 
 """
 Tracks separately compiled libraries for main and holes
@@ -145,6 +147,9 @@ function generate_dylib_path(prefix::String, fname::Symbol)
 end
 
 function compile_module_to_dylib(mod::LLVM.Module, fname::Symbol, prefix::String="lib")
+    # Ensure runtime library is compiled and available
+    runtime_lib = get_runtime_library_path()
+
     # Create target machine with PIC
     triple = Sys.MACHINE
     target = LLVM.Target(triple=triple)
@@ -162,11 +167,13 @@ function compile_module_to_dylib(mod::LLVM.Module, fname::Symbol, prefix::String
 
     try
         if Sys.islinux()
-            run(`gcc -shared -o $lib_path $obj_path`)
+            # Link against the runtime library
+            run(`gcc -shared -o $lib_path $obj_path $runtime_lib`)
         elseif Sys.isapple()
-            run(`clang -shared -o $lib_path $obj_path`)
+            # On macOS, link against the runtime library
+            run(`clang -shared -o $lib_path $obj_path $runtime_lib`)
         elseif Sys.iswindows()
-            run(`cl /LD /Fe:$lib_path $obj_path`)
+            run(`cl /LD /Fe:$lib_path $obj_path $runtime_lib`)
         else
             error("Unsupported platform for shared library compilation")
         end
@@ -195,6 +202,7 @@ function compile_to_separate_dylibs(code::Expr)
     hole_lib_handles = Ptr{Cvoid}[]
     hole_func_names = Symbol[]
     hole_asts = Expr[]
+    hole_func_signatures = []  # Store signature info: (nparams, returns_object)
 
     for (i, hole_block_expr) in enumerate(normalized_hole_blocks)
         push!(hole_asts, deepcopy(hole_block_expr))
@@ -213,6 +221,13 @@ function compile_to_separate_dylibs(code::Expr)
             LLVM.linkage!(LLVM.functions(mod)[string(hole_fname)], LLVM.API.LLVMExternalLinkage)
             optimize!(mod)
 
+            # Extract function signature info before disposing context
+            hole_func = LLVM.functions(mod)[string(hole_fname)]
+            func_type = LLVM.function_type(hole_func)
+            n_params = length(LLVM.parameters(func_type))
+            returns_object = (LLVM.return_type(func_type) == julia_object_type())
+            push!(hole_func_signatures, (n_params, returns_object))
+
             # Compile to dylib
             lib_path = compile_module_to_dylib(mod, hole_fname, "hole$(i)")
             push!(hole_lib_paths, lib_path)
@@ -225,6 +240,7 @@ function compile_to_separate_dylibs(code::Expr)
         else
             push!(hole_lib_paths, "")
             push!(hole_lib_handles, C_NULL)
+            push!(hole_func_signatures, (0, false))
         end
     end
 
@@ -250,8 +266,16 @@ function compile_to_separate_dylibs(code::Expr)
         error("Failed to generate main function")
     end
 
+    # Build external signatures dictionary for hole functions
+    external_sigs = Dict{Symbol, Tuple{Int, Bool}}()
+    for (i, hole_fname) in enumerate(hole_func_names)
+        if i <= length(hole_func_signatures)
+            external_sigs[hole_fname] = hole_func_signatures[i]
+        end
+    end
+
     ctx = LLVM.Context()
-    mod = generate_IR(ctx, main_func_ast)
+    mod = generate_IR(ctx, main_func_ast; external_sigs=external_sigs)
     LLVM.linkage!(LLVM.functions(mod)[string(main_fname)], LLVM.API.LLVMExternalLinkage)
     optimize!(mod)
 

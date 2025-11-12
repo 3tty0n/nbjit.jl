@@ -3,6 +3,8 @@ module IJuliaIntegration
 using Libdl  # For dlopen, dlsym, dlclose
 
 include("./jit_split.jl")
+include("./jit_runtime.jl")
+include("./runtime_library.jl")
 include("./jit_dylib.jl")
 
 export NotebookSession, current_session, set_default_session!, run_cell!

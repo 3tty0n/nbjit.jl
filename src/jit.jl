@@ -77,6 +77,84 @@ function infer_parameter_types(func_body::Expr, param_names::Vector{Symbol})::Di
     return types
 end
 
+"""
+Infer the return type of a function by analyzing the last expression.
+Returns :primitive for Int64/Float64/Bool, :object for Dict/Symbol, etc.
+"""
+function infer_return_type(func_body::Expr)::Symbol
+    # Track variable types through assignments
+    var_types = Dict{Symbol, Symbol}()
+
+    # Scan all assignments to build var_types map
+    function scan_assignments(e)
+        if e isa Expr
+            if e.head == :(=) && e.args[1] isa Symbol
+                var = e.args[1]
+                rhs = e.args[2]
+
+                # Determine type of RHS
+                if rhs isa Expr && rhs.head == :call && rhs.args[1] == :Dict
+                    var_types[var] = :object
+                elseif rhs isa Symbol && haskey(var_types, rhs)
+                    # Variable assigned from another variable
+                    var_types[var] = var_types[rhs]
+                else
+                    var_types[var] = :primitive
+                end
+            elseif e.head == :block
+                for arg in e.args
+                    scan_assignments(arg)
+                end
+            end
+        end
+    end
+
+    scan_assignments(func_body)
+
+    # Find the last non-LineNumberNode expression
+    last_expr = nothing
+    if func_body.head == :block
+        for i in length(func_body.args):-1:1
+            arg = func_body.args[i]
+            if !(arg isa LineNumberNode)
+                last_expr = arg
+                break
+            end
+        end
+    else
+        last_expr = func_body
+    end
+
+    if last_expr === nothing
+        return :primitive
+    end
+
+    # Check if last expression is a Dict construction or reference
+    function check_expr(e)::Symbol
+        if e isa Symbol
+            # Look up variable type from our tracking
+            return get(var_types, e, :primitive)
+        elseif e isa Expr
+            if e.head == :call
+                if e.args[1] == :Dict
+                    return :object
+                end
+            elseif e.head == :(=)
+                # Return type is based on RHS
+                return check_expr(e.args[2])
+            elseif e.head == :ref
+                # dict[key] returns an object that needs unboxing
+                # But since arithmetic operations unbox it, check context
+                # For now, assume :primitive (since it will be unboxed for use)
+                return :primitive
+            end
+        end
+        return :primitive
+    end
+
+    return check_expr(last_expr)
+end
+
 current_scope(cg::CodeGen) = cg.current_scope
 function new_scope(f, cg::CodeGen)
     open_scope!(current_scope(cg))
@@ -246,7 +324,8 @@ end
 
 function declare_dict_setindex(cg::CodeGen)
     obj_ptr = julia_object_type()
-    return get_or_declare_runtime_function(cg, "nbjit_dict_setindex!", LLVM.VoidType(), LLVM.LLVMType[obj_ptr, obj_ptr, obj_ptr])
+    # Use C-compatible name without exclamation mark
+    return get_or_declare_runtime_function(cg, "nbjit_dict_setindex_bang", LLVM.VoidType(), LLVM.LLVMType[obj_ptr, obj_ptr, obj_ptr])
 end
 
 function declare_symbol_from_cstr(cg::CodeGen)
@@ -307,16 +386,17 @@ function codegen(cg::CodeGen, expr::Expr)
         if expr.args[1] == :+
             operands = expr.args[2:end]
             @assert !isempty(operands) ":+ requires at least one operand"
-            acc = codegen(cg, operands[1])
+            acc_raw = codegen(cg, operands[1])
+            acc, acc_type = ensure_primitive(cg, acc_raw)
             for operand in operands[2:end]
-                next = codegen(cg, operand)
-                acc_type = LLVM.value_type(acc)
-                next_type = LLVM.value_type(next)
-                if acc_type == LLVM.DoubleType() || next_type == LLVM.DoubleType()
-                    if acc_type != LLVM.DoubleType()
+                next_raw = codegen(cg, operand)
+                next, next_type = ensure_primitive(cg, next_raw)
+                if acc_type == :double || next_type == :double
+                    if acc_type != :double
                         acc = LLVM.sitofp!(cg.builder, acc, LLVM.DoubleType(), "add_promote_lhs")
+                        acc_type = :double
                     end
-                    if next_type != LLVM.DoubleType()
+                    if next_type != :double
                         next = LLVM.sitofp!(cg.builder, next, LLVM.DoubleType(), "add_promote_rhs")
                     end
                     acc = LLVM.fadd!(cg.builder, acc, next, "addtmp")
@@ -328,9 +408,17 @@ function codegen(cg::CodeGen, expr::Expr)
         elseif expr.args[1] == :-
             lhs = expr.args[2]
             rhs = expr.args[3]
-            L = codegen(cg, lhs)
-            R = codegen(cg, rhs)
-            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+            L_raw = codegen(cg, lhs)
+            R_raw = codegen(cg, rhs)
+            L, L_type = ensure_primitive(cg, L_raw)
+            R, R_type = ensure_primitive(cg, R_raw)
+            if L_type == :double || R_type == :double
+                if L_type != :double
+                    L = LLVM.sitofp!(cg.builder, L, LLVM.DoubleType(), "sub_promote_lhs")
+                end
+                if R_type != :double
+                    R = LLVM.sitofp!(cg.builder, R, LLVM.DoubleType(), "sub_promote_rhs")
+                end
                 return LLVM.fsub!(cg.builder, L, R, "subtmp")
             else
                 return LLVM.sub!(cg.builder, L, R, "subtmp")
@@ -356,9 +444,17 @@ function codegen(cg::CodeGen, expr::Expr)
         elseif expr.args[1] == :/
             lhs = expr.args[2]
             rhs = expr.args[3]
-            L = codegen(cg, lhs)
-            R = codegen(cg, rhs)
-            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+            L_raw = codegen(cg, lhs)
+            R_raw = codegen(cg, rhs)
+            L, L_type = ensure_primitive(cg, L_raw)
+            R, R_type = ensure_primitive(cg, R_raw)
+            if L_type == :double || R_type == :double
+                if L_type != :double
+                    L = LLVM.sitofp!(cg.builder, L, LLVM.DoubleType(), "div_promote_lhs")
+                end
+                if R_type != :double
+                    R = LLVM.sitofp!(cg.builder, R, LLVM.DoubleType(), "div_promote_rhs")
+                end
                 return LLVM.fdiv!(cg.builder, L, R, "divtmp")
             else
                 return LLVM.sdiv!(cg.builder, L, R, "divtmp")
@@ -366,9 +462,17 @@ function codegen(cg::CodeGen, expr::Expr)
         elseif expr.args[1] == :%
             lhs = expr.args[2]
             rhs = expr.args[3]
-            L = codegen(cg, lhs)
-            R = codegen(cg, rhs)
-            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+            L_raw = codegen(cg, lhs)
+            R_raw = codegen(cg, rhs)
+            L, L_type = ensure_primitive(cg, L_raw)
+            R, R_type = ensure_primitive(cg, R_raw)
+            if L_type == :double || R_type == :double
+                if L_type != :double
+                    L = LLVM.sitofp!(cg.builder, L, LLVM.DoubleType(), "mod_promote_lhs")
+                end
+                if R_type != :double
+                    R = LLVM.sitofp!(cg.builder, R, LLVM.DoubleType(), "mod_promote_rhs")
+                end
                 return LLVM.frem!(cg.builder, L, R, "modtmp")
             else
                 return LLVM.srem!(cg.builder, L, R, "modtmp")
@@ -376,9 +480,17 @@ function codegen(cg::CodeGen, expr::Expr)
         elseif expr.args[1] == :<
             lhs = expr.args[2]
             rhs = expr.args[3]
-            L = codegen(cg, lhs)
-            R = codegen(cg, rhs)
-            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+            L_raw = codegen(cg, lhs)
+            R_raw = codegen(cg, rhs)
+            L, L_type = ensure_primitive(cg, L_raw)
+            R, R_type = ensure_primitive(cg, R_raw)
+            if L_type == :double || R_type == :double
+                if L_type != :double
+                    L = LLVM.sitofp!(cg.builder, L, LLVM.DoubleType(), "lt_promote_lhs")
+                end
+                if R_type != :double
+                    R = LLVM.sitofp!(cg.builder, R, LLVM.DoubleType(), "lt_promote_rhs")
+                end
                 return LLVM.fcmp!(cg.builder, LLVM.API.LLVMRealOLT, L, R, "cmptmp")
             else
                 return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntSLT, L, R, "cmptmp")
@@ -386,9 +498,17 @@ function codegen(cg::CodeGen, expr::Expr)
         elseif expr.args[1] == :>
             lhs = expr.args[2]
             rhs = expr.args[3]
-            L = codegen(cg, lhs)
-            R = codegen(cg, rhs)
-            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+            L_raw = codegen(cg, lhs)
+            R_raw = codegen(cg, rhs)
+            L, L_type = ensure_primitive(cg, L_raw)
+            R, R_type = ensure_primitive(cg, R_raw)
+            if L_type == :double || R_type == :double
+                if L_type != :double
+                    L = LLVM.sitofp!(cg.builder, L, LLVM.DoubleType(), "gt_promote_lhs")
+                end
+                if R_type != :double
+                    R = LLVM.sitofp!(cg.builder, R, LLVM.DoubleType(), "gt_promote_rhs")
+                end
                 return LLVM.fcmp!(cg.builder, LLVM.API.LLVMRealOGT, L, R, "cmptmp")
             else
                 return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntSGT, L, R, "cmptmp")
@@ -396,9 +516,17 @@ function codegen(cg::CodeGen, expr::Expr)
         elseif expr.args[1] == :<=
             lhs = expr.args[2]
             rhs = expr.args[3]
-            L = codegen(cg, lhs)
-            R = codegen(cg, rhs)
-            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+            L_raw = codegen(cg, lhs)
+            R_raw = codegen(cg, rhs)
+            L, L_type = ensure_primitive(cg, L_raw)
+            R, R_type = ensure_primitive(cg, R_raw)
+            if L_type == :double || R_type == :double
+                if L_type != :double
+                    L = LLVM.sitofp!(cg.builder, L, LLVM.DoubleType(), "le_promote_lhs")
+                end
+                if R_type != :double
+                    R = LLVM.sitofp!(cg.builder, R, LLVM.DoubleType(), "le_promote_rhs")
+                end
                 return LLVM.fcmp!(cg.builder, LLVM.API.LLVMRealOLE, L, R, "cmptmp")
             else
                 return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntSLE, L, R, "cmptmp")
@@ -406,9 +534,17 @@ function codegen(cg::CodeGen, expr::Expr)
         elseif expr.args[1] == :>=
             lhs = expr.args[2]
             rhs = expr.args[3]
-            L = codegen(cg, lhs)
-            R = codegen(cg, rhs)
-            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+            L_raw = codegen(cg, lhs)
+            R_raw = codegen(cg, rhs)
+            L, L_type = ensure_primitive(cg, L_raw)
+            R, R_type = ensure_primitive(cg, R_raw)
+            if L_type == :double || R_type == :double
+                if L_type != :double
+                    L = LLVM.sitofp!(cg.builder, L, LLVM.DoubleType(), "ge_promote_lhs")
+                end
+                if R_type != :double
+                    R = LLVM.sitofp!(cg.builder, R, LLVM.DoubleType(), "ge_promote_rhs")
+                end
                 return LLVM.fcmp!(cg.builder, LLVM.API.LLVMRealOGE, L, R, "cmptmp")
             else
                 return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntSGE, L, R, "cmptmp")
@@ -416,9 +552,17 @@ function codegen(cg::CodeGen, expr::Expr)
         elseif expr.args[1] == :(==)
             lhs = expr.args[2]
             rhs = expr.args[3]
-            L = codegen(cg, lhs)
-            R = codegen(cg, rhs)
-            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+            L_raw = codegen(cg, lhs)
+            R_raw = codegen(cg, rhs)
+            L, L_type = ensure_primitive(cg, L_raw)
+            R, R_type = ensure_primitive(cg, R_raw)
+            if L_type == :double || R_type == :double
+                if L_type != :double
+                    L = LLVM.sitofp!(cg.builder, L, LLVM.DoubleType(), "eq_promote_lhs")
+                end
+                if R_type != :double
+                    R = LLVM.sitofp!(cg.builder, R, LLVM.DoubleType(), "eq_promote_rhs")
+                end
                 return LLVM.fcmp!(cg.builder, LLVM.API.LLVMRealOEQ, L, R, "cmptmp")
             else
                 return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntEQ, L, R, "cmptmp")
@@ -426,9 +570,17 @@ function codegen(cg::CodeGen, expr::Expr)
         elseif expr.args[1] == :(!=)
             lhs = expr.args[2]
             rhs = expr.args[3]
-            L = codegen(cg, lhs)
-            R = codegen(cg, rhs)
-            if LLVM.value_type(L) == LLVM.DoubleType() || LLVM.value_type(R) == LLVM.DoubleType()
+            L_raw = codegen(cg, lhs)
+            R_raw = codegen(cg, rhs)
+            L, L_type = ensure_primitive(cg, L_raw)
+            R, R_type = ensure_primitive(cg, R_raw)
+            if L_type == :double || R_type == :double
+                if L_type != :double
+                    L = LLVM.sitofp!(cg.builder, L, LLVM.DoubleType(), "ne_promote_lhs")
+                end
+                if R_type != :double
+                    R = LLVM.sitofp!(cg.builder, R, LLVM.DoubleType(), "ne_promote_rhs")
+                end
                 return LLVM.fcmp!(cg.builder, LLVM.API.LLVMRealONE, L, R, "cmptmp")
             else
                 return LLVM.icmp!(cg.builder, LLVM.API.LLVMIntNE, L, R, "cmptmp")
@@ -478,6 +630,18 @@ function codegen(cg::CodeGen, expr::Expr)
                     key = codegen(cg, arg.args[2])
                     value = codegen(cg, arg.args[3])
 
+                    # Box key if it's a primitive
+                    key_type = LLVM.value_type(key)
+                    if key_type == LLVM.Int64Type()
+                        box_func = declare_box_int64(cg)
+                        box_ft = LLVM.function_type(box_func)
+                        key = LLVM.call!(cg.builder, box_ft, box_func, [key], "boxed")
+                    elseif key_type == LLVM.DoubleType()
+                        box_func = declare_box_float64(cg)
+                        box_ft = LLVM.function_type(box_func)
+                        key = LLVM.call!(cg.builder, box_ft, box_func, [key], "boxed")
+                    end
+
                     # Box value if it's a primitive
                     value_type = LLVM.value_type(value)
                     if value_type == LLVM.Int64Type()
@@ -503,6 +667,18 @@ function codegen(cg::CodeGen, expr::Expr)
             dict_ptr = codegen(cg, expr.args[2])
             value = codegen(cg, expr.args[3])
             key = codegen(cg, expr.args[4])
+
+            # Box key if it's a primitive
+            key_type = LLVM.value_type(key)
+            if key_type == LLVM.Int64Type()
+                box_func = declare_box_int64(cg)
+                box_ft = LLVM.function_type(box_func)
+                key = LLVM.call!(cg.builder, box_ft, box_func, [key], "boxed")
+            elseif key_type == LLVM.DoubleType()
+                box_func = declare_box_float64(cg)
+                box_ft = LLVM.function_type(box_func)
+                key = LLVM.call!(cg.builder, box_ft, box_func, [key], "boxed")
+            end
 
             # Box value if it's a primitive
             value_type = LLVM.value_type(value)
@@ -530,26 +706,52 @@ function codegen(cg::CodeGen, expr::Expr)
                 push!(arg_vals, codegen(cg, v))
             end
 
-            args = LLVM.Value[]
-            for val in arg_vals
-                push!(args, ensure_int64(cg, val))
-            end
-
             func_name = string(callee)
-            if !haskey(LLVM.functions(cg.mod), func_name)
+
+            # Check if function already exists in module
+            if haskey(LLVM.functions(cg.mod), func_name)
+                func = LLVM.functions(cg.mod)[func_name]
+                if length(LLVM.parameters(func)) != length(arg_vals)
+                    error("number of parameters mismatch for $(callee)")
+                end
+
+                # Get expected parameter types from function signature
+                ft = LLVM.function_type(func)
+                param_types = LLVM.parameters(ft)
+
+                # Convert arguments to match function signature
+                args = LLVM.Value[]
+                for (i, val) in enumerate(arg_vals)
+                    expected_type = param_types[i]
+                    val_type = LLVM.value_type(val)
+
+                    if expected_type == val_type
+                        push!(args, val)
+                    elseif expected_type == LLVM.IntType(64)
+                        push!(args, ensure_int64(cg, val))
+                    else
+                        # For now, assume no conversion needed for other types
+                        push!(args, val)
+                    end
+                end
+
+                return LLVM.call!(cg.builder, ft, func, args, "calltmp")
+            else
+                # Function not yet defined - create forward declaration
+                # Convert all args to Int64 for now (this is a limitation)
+                args = LLVM.Value[]
+                for val in arg_vals
+                    push!(args, ensure_int64(cg, val))
+                end
+
                 arg_types = fill(LLVM.IntType(64), length(args))
                 func_type = LLVM.FunctionType(LLVM.IntType(64), arg_types)
                 func = LLVM.Function(cg.mod, func_name, func_type)
                 LLVM.linkage!(func, LLVM.API.LLVMExternalLinkage)
-            else
-                func = LLVM.functions(cg.mod)[func_name]
-                if length(LLVM.parameters(func)) != length(args)
-                    error("number of parameters mismatch for $(callee)")
-                end
-            end
 
-            ft = LLVM.function_type(func)
-            return LLVM.call!(cg.builder, ft, func, args, "calltmp")
+                ft = LLVM.function_type(func)
+                return LLVM.call!(cg.builder, ft, func, args, "calltmp")
+            end
         else
             error("unreachable path", expr)
         end
@@ -572,6 +774,9 @@ function codegen(cg::CodeGen, expr::Expr)
         # Infer parameter types from function body
         param_types = infer_parameter_types(expr.args[2], param_symbols)
 
+        # Infer return type from function body
+        return_type_sym = infer_return_type(expr.args[2])
+
         # Create LLVM function with inferred types
         args = LLVM.LLVMType[]
         for param_sym in param_symbols
@@ -583,8 +788,14 @@ function codegen(cg::CodeGen, expr::Expr)
             end
         end
 
-        # For now, return type is always Int64 (we can enhance this later)
-        func_type = LLVM.FunctionType(LLVM.IntType(64), args)
+        # Set return type based on inference
+        return_llvm_type = if return_type_sym == :object
+            julia_object_type()
+        else
+            LLVM.IntType(64)
+        end
+
+        func_type = LLVM.FunctionType(return_llvm_type, args)
         func = LLVM.Function(cg.mod, func_name, func_type)
         LLVM.linkage!(func, LLVM.API.LLVMExternalLinkage)
 
@@ -605,19 +816,41 @@ function codegen(cg::CodeGen, expr::Expr)
             end
             body = codegen(cg, expr.args[2])
 
-            # Convert return value to Int64 if necessary
+            # Convert return value to match function signature
             if body === nothing
-                ret_val = LLVM.ConstantInt(LLVM.IntType(64), 0)
+                if return_type_sym == :object
+                    # Return null pointer for object type
+                    ret_val = LLVM.ConstantPointerNull(julia_object_type())
+                else
+                    ret_val = LLVM.ConstantInt(LLVM.IntType(64), 0)
+                end
             else
                 body_type = LLVM.value_type(body)
-                if body_type == LLVM.DoubleType()
-                    # Cast float to int
-                    ret_val = LLVM.fptosi!(cg.builder, body, LLVM.IntType(64), "fptosi")
-                elseif body_type == LLVM.Int1Type()
-                    # Extend bool to int64
-                    ret_val = LLVM.zext!(cg.builder, body, LLVM.IntType(64), "zext")
+                if return_type_sym == :object
+                    # Function returns object - body should be a pointer
+                    if body_type == julia_object_type()
+                        ret_val = body
+                    else
+                        error("Function declared to return object but body returns $(body_type)")
+                    end
                 else
-                    ret_val = body
+                    # Function returns primitive (Int64)
+                    if body_type == LLVM.IntType(64)
+                        ret_val = body
+                    elseif body_type == LLVM.DoubleType()
+                        # Cast float to int
+                        ret_val = LLVM.fptosi!(cg.builder, body, LLVM.IntType(64), "fptosi")
+                    elseif body_type == LLVM.Int1Type()
+                        # Extend bool to int64
+                        ret_val = LLVM.zext!(cg.builder, body, LLVM.IntType(64), "zext")
+                    elseif body_type == julia_object_type()
+                        # Unbox object to int64
+                        unbox_func = declare_unbox_int64(cg)
+                        ft = LLVM.function_type(unbox_func)
+                        ret_val = LLVM.call!(cg.builder, ft, unbox_func, [body], "unboxed")
+                    else
+                        ret_val = body
+                    end
                 end
             end
             LLVM.ret!(cg.builder, ret_val)
@@ -680,6 +913,18 @@ function codegen(cg::CodeGen, expr::Expr)
         # Dictionary/array indexing: dict[:key]
         container = codegen(cg, expr.args[1])
         index = codegen(cg, expr.args[2])
+
+        # Box index if it's a primitive
+        index_type = LLVM.value_type(index)
+        if index_type == LLVM.Int64Type()
+            box_func = declare_box_int64(cg)
+            box_ft = LLVM.function_type(box_func)
+            index = LLVM.call!(cg.builder, box_ft, box_func, [index], "boxed")
+        elseif index_type == LLVM.DoubleType()
+            box_func = declare_box_float64(cg)
+            box_ft = LLVM.function_type(box_func)
+            index = LLVM.call!(cg.builder, box_ft, box_func, [index], "boxed")
+        end
 
         # Call getindex runtime function
         getindex_func = declare_dict_getindex(cg)
@@ -822,11 +1067,29 @@ function codegen(cg::CodeGen, expr::Expr)
         LLVM.position!(cg.builder, loop_end)
         return LLVM.ConstantInt(LLVM.IntType(64), 0)
     elseif expr.head == :block
-        local result = LLVM.ConstantInt(LLVM.IntType(64), 0)
+        # First pass: compile all function definitions
+        # Process in reverse order so callees are defined before callers
+        functions = []
+        non_functions = []
+
         for stmt in expr.args
             if stmt isa LineNumberNode
                 continue
+            elseif stmt isa Expr && stmt.head == :function
+                push!(functions, stmt)
+            else
+                push!(non_functions, stmt)
             end
+        end
+
+        # Compile functions in reverse order
+        for func_expr in reverse(functions)
+            codegen(cg, func_expr)
+        end
+
+        # Then compile non-function statements
+        local result = LLVM.ConstantInt(LLVM.IntType(64), 0)
+        for stmt in non_functions
             value = codegen(cg, stmt)
             if value !== nothing
                 result = value
@@ -850,8 +1113,18 @@ function create_entry_block_allocation(cg::CodeGen, fn::LLVM.Function, varname::
     end
 end
 
-function generate_IR(ctx::LLVM.Context, expr::Expr)
+function generate_IR(ctx::LLVM.Context, expr::Expr; external_sigs::Dict{Symbol, Tuple{Int, Bool}}=Dict{Symbol, Tuple{Int, Bool}}())
     cg = CodeGen()
+
+    # Pre-declare external functions with correct signatures
+    for (fname, (n_params, returns_object)) in external_sigs
+        param_types = fill(LLVM.Int64Type(), n_params)
+        ret_type = returns_object ? julia_object_type() : LLVM.Int64Type()
+        func_type = LLVM.FunctionType(ret_type, param_types)
+        ext_func = LLVM.Function(cg.mod, string(fname), func_type)
+        LLVM.linkage!(ext_func, LLVM.API.LLVMExternalLinkage)
+    end
+
     codegen(cg, expr)
     LLVM.verify(cg.mod)
     LLVM.dispose(cg.builder)

@@ -14,6 +14,10 @@ function parse_annot(expr::String, unconstant_expr)
     return expr
 end
 
+function parse_annot(expr::QuoteNode, unconstant_expr)
+    return expr
+end
+
 # Handle vectors (e.g., guard symbol payloads from split_ast)
 function parse_annot(expr::Vector, unconstant_expr)
     for e in expr
