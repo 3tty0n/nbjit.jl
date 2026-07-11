@@ -1,0 +1,188 @@
+"""
+Split-and-compile pipeline using @hole markers, partial evaluation, and LLVM.jl.
+
+The workflow:
+  1. Convert @hole annotations into explicit :hole nodes.
+  2. Split the AST at each hole, capturing guard symbols.
+  3. Partially evaluate the main block and each hole block.
+  4. Compile the partially evaluated blocks to LLVM IR modules via LLVM.jl.
+  5. Allow selective recompilation of individual hole blocks when they change,
+     without recompiling the main block.
+"""
+
+using LLVM
+
+if !isdefined(@__MODULE__, :SplitAst)
+    include("./split_ast.jl")
+end
+if !isdefined(@__MODULE__, :partial_evaluate_and_make_entry)
+    include("./partial_evaluate.jl")
+end
+if !isdefined(@__MODULE__, :compile_to_llvm)
+    include("./jit.jl")
+end
+
+mutable struct CompiledSplitCode
+    main_mod::Union{Nothing, LLVM.Module}
+    main_ctx::Union{Nothing, LLVM.Context}
+    main_fname::Symbol
+    main_inputs::Vector{Symbol}
+    main_func_expr::Expr
+    hole_mods::Vector{Union{Nothing, LLVM.Module}}
+    hole_ctxs::Vector{Union{Nothing, LLVM.Context}}
+    hole_fnames::Vector{Symbol}
+    hole_inputs::Vector{Vector{Symbol}}
+    hole_func_exprs::Vector{Expr}
+    guard_syms::Vector{Vector{Symbol}}
+    guard_values::Dict{Symbol, Any}
+    main_ast::Expr
+    hole_asts::Vector{Expr}
+end
+
+const LLVM_COMPILATION_CACHE = Dict{UInt64, CompiledSplitCode}()
+
+function unique_symbols(syms::Vector{Symbol})
+    seen = Set{Symbol}()
+    ordered = Symbol[]
+    for sym in syms
+        if !(sym in seen)
+            push!(ordered, sym)
+            push!(seen, sym)
+        end
+    end
+    return ordered
+end
+
+function flatten_guard_syms(guard_payload)::Vector{Symbol}
+    syms = Symbol[]
+    _flatten_guard_syms!(guard_payload, syms)
+    return unique_symbols(syms)
+end
+
+_flatten_guard_syms!(sym::Symbol, acc::Vector{Symbol}) = push!(acc, sym)
+
+function _flatten_guard_syms!(payload, acc::Vector{Symbol})
+    for item in payload
+        if item isa Symbol
+            push!(acc, item)
+        elseif item isa AbstractVector
+            _flatten_guard_syms!(item, acc)
+        end
+    end
+end
+
+function strip_hole_markers(block::Expr)
+    new_args = Any[]
+    for arg in block.args
+        if isa(arg, Expr) && arg.head == :hole
+            continue
+        else
+            push!(new_args, deepcopy(arg))
+        end
+    end
+    return Expr(block.head, new_args...)
+end
+
+function extract_function_expr(func_expr::Expr)
+    if func_expr.head == :function
+        return func_expr
+    elseif func_expr.head == :block
+        for arg in func_expr.args
+            if arg isa Expr && arg.head == :function
+                return arg
+            end
+        end
+    end
+    return nothing
+end
+
+function compile_function(func_expr::Expr, fname::Symbol)
+    func_ast = extract_function_expr(func_expr)
+    func_ast === nothing && error("Failed to locate function definition for $fname")
+    compile_to_llvm(func_ast, fname)
+end
+
+function compute_ast_hash(ast)
+    normalized = Base.remove_linenums!(deepcopy(ast))
+    return hash(string(normalized))
+end
+
+"""
+    prepare_split(code::Expr) -> (main_ast, hole_blocks, guard_syms)
+
+Convert @hole annotations, validate the AST, and return the main block (with
+hole placeholders), the hole blocks, and guard symbols for each hole.
+"""
+function prepare_split(code)
+    # Reset global ID counters to ensure consistent hashing across calls
+    # This is important for incremental compilation detection
+    SplitAst.hole_id = -1
+    SplitAst.preserve_id = -1
+    SplitAst.persistent_id = -1
+
+    ast_with_holes = SplitAst.convert_ast_with_hole(code)
+
+    if !isa(ast_with_holes, Expr) || !(ast_with_holes.head in (:block, :toplevel, :begin))
+        ast_with_holes = Expr(:block, ast_with_holes)
+    end
+
+    hole_count = count(x -> isa(x, Expr) && x.head === :hole, ast_with_holes.args)
+    hole_count == 0 && error("No @hole markers found in code")
+
+    is_valid, msg = SplitAst.validate_ast_for_splitting(ast_with_holes)
+    is_valid || error("AST validation failed: $msg")
+
+    if hole_count == 1
+        main_block, hole_block = SplitAst.split_at_hole(ast_with_holes)
+        hole_blocks = [deepcopy(hole_block)]
+        hole_expr_idx = findfirst(x -> isa(x, Expr) && x.head === :hole, main_block.args)
+        guard_syms = [hole_expr_idx === nothing ? Symbol[] : flatten_guard_syms(main_block.args[hole_expr_idx].args)]
+
+        # Normalize main_ast with content-independent placeholder
+        main_ast = deepcopy(main_block)
+        if hole_expr_idx !== nothing
+            main_ast.args[hole_expr_idx] = Expr(:hole, 1)
+        end
+    else
+        results = SplitAst.split_at_holes(ast_with_holes)
+        hole_blocks = [deepcopy(r[2]) for r in results]
+        guard_syms = [flatten_guard_syms(r[3]) for r in results]
+
+        # Create main_ast with ALL holes replaced by simple placeholders
+        # Use hole index as placeholder to make it content-independent
+        main_ast = deepcopy(ast_with_holes)
+        hole_indices = findall(x -> isa(x, Expr) && x.head === :hole, main_ast.args)
+        for (idx, hole_idx) in enumerate(hole_indices)
+            # Use a simple placeholder that only depends on hole position, not content
+            main_ast.args[hole_idx] = Expr(:hole, idx)
+        end
+    end
+
+    return main_ast, hole_blocks, guard_syms
+end
+
+"""
+    check_guards(compiled, env) -> Bool
+
+Verify that guard symbols have not changed relative to the cached values.
+"""
+function check_guards(compiled::CompiledSplitCode, env::Dict{Symbol, Any})
+    guard_list = unique_symbols(reduce(vcat, compiled.guard_syms; init=Symbol[]))
+    if isempty(compiled.guard_values)
+        for sym in guard_list
+            if haskey(env, sym)
+                compiled.guard_values[sym] = env[sym]
+            end
+        end
+        return true
+    end
+
+    for sym in guard_list
+        old_val = get(compiled.guard_values, sym, nothing)
+        new_val = get(env, sym, nothing)
+        if old_val !== new_val
+            return false
+        end
+    end
+    return true
+end
